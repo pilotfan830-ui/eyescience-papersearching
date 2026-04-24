@@ -55,6 +55,8 @@ def health():
         'qwen_model': engine._qwen_model,
         'startup_timing': engine.startup_timing,
         'last_rewrite_debug': engine.get_last_rewrite_debug(),
+        'last_rerank_debug': engine.get_last_rerank_debug(),
+        'last_author_debug': engine.get_last_author_debug(),
     }
     payload.update(engine.embedding_status())
     return payload

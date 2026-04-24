@@ -177,11 +177,23 @@ class SearchEngine:
             self._rank_cache_lock = threading.Lock()
             self._fts_lock = threading.Lock()
             self._rewrite_debug_lock = threading.Lock()
+            self._rerank_debug_lock = threading.Lock()
+            self._author_debug_lock = threading.Lock()
             self._last_rewrite_debug: Dict[str, Any] = {
                 'status': 'not_run',
                 'query': None,
                 'retrieval_query': None,
                 'rewrite_enabled': self.rewrite_enabled,
+            }
+            self._last_rerank_debug: Dict[str, Any] = {
+                'status': 'not_run',
+                'query': None,
+                'rerank_enabled': self.qwen_rerank_enabled,
+            }
+            self._last_author_debug: Dict[str, Any] = {
+                'status': 'not_run',
+                'query': None,
+                'author_recall_enabled': False,
             }
         with startup_timer.step('build_fts_index'):
             self._fts_conn = self._build_fts_index()
@@ -195,6 +207,24 @@ class SearchEngine:
     def get_last_rewrite_debug(self) -> Dict[str, Any]:
         with self._rewrite_debug_lock:
             return json.loads(json.dumps(self._last_rewrite_debug, ensure_ascii=False, default=str))
+
+    def _set_last_rerank_debug(self, payload: Mapping[str, Any]) -> None:
+        safe_payload = json.loads(json.dumps(dict(payload), ensure_ascii=False, default=str))
+        with self._rerank_debug_lock:
+            self._last_rerank_debug = safe_payload
+
+    def get_last_rerank_debug(self) -> Dict[str, Any]:
+        with self._rerank_debug_lock:
+            return json.loads(json.dumps(self._last_rerank_debug, ensure_ascii=False, default=str))
+
+    def _set_last_author_debug(self, payload: Mapping[str, Any]) -> None:
+        safe_payload = json.loads(json.dumps(dict(payload), ensure_ascii=False, default=str))
+        with self._author_debug_lock:
+            self._last_author_debug = safe_payload
+
+    def get_last_author_debug(self) -> Dict[str, Any]:
+        with self._author_debug_lock:
+            return json.loads(json.dumps(self._last_author_debug, ensure_ascii=False, default=str))
 
     def _configure_data_source(self, db_path: Optional[str]) -> None:
         explicit_source = (
@@ -888,6 +918,9 @@ class SearchEngine:
             'of the main query, suitable to run as a standalone FTS query. '
             'Do not place broader related concepts before the direct translation. '
             'If the query is English, keywords_zh should contain at most one exact Chinese translation. '
+            'Default to must_terms = []. '
+            'Use must_terms only when the query contains an indispensable literal token that must be preserved verbatim. '
+            'Never output a single character or single letter in must_terms. '
             'Only use must_terms for truly indispensable literal terms. '
             'Do not include explanation.'
         )
@@ -926,6 +959,13 @@ class SearchEngine:
             kw_zh = [str(x).strip() for x in (obj.get('keywords_zh') or []) if str(x).strip()]
             kw_en = [str(x).strip() for x in (obj.get('keywords_en') or []) if str(x).strip()]
             must = [str(x).strip() for x in (obj.get('must_terms') or []) if str(x).strip()]
+            must = [
+                x for x in must
+                if (
+                    (len(re.findall(r'[\u4e00-\u9fff]', x)) >= 2)
+                    or (len(''.join(re.findall(r'[A-Za-z0-9]+', x))) >= 3)
+                )
+            ]
             return QueryRewrite(
                 keywords_zh=list(dict.fromkeys(kw_zh))[:1],
                 keywords_en=list(dict.fromkeys(kw_en))[:2],
@@ -1410,7 +1450,8 @@ class SearchEngine:
 
         if re.search(r'[A-Za-z]', raw):
             candidates.extend(rewrite.keywords_zh[:1])
-        candidates.extend(rewrite.must_terms[:1])
+        if not self._contains_cjk(raw):
+            candidates.extend(rewrite.must_terms[:1])
         candidates.extend(rewrite.keywords_zh[1:2])
         candidates = [c for c in candidates if str(c or '').strip().lower() not in selected_norms]
 
@@ -1688,19 +1729,40 @@ class SearchEngine:
 
     def _qwen_rerank(self, query: str, candidates: List[Dict]) -> Dict[int, float]:
         if not self.qwen_rerank_enabled or not candidates:
+            self._set_last_rerank_debug({
+                'status': 'disabled' if not self.qwen_rerank_enabled else 'no_candidates',
+                'query': query,
+                'rerank_enabled': self.qwen_rerank_enabled,
+                'candidate_count': len(candidates),
+                'topn_requested': max(self._qwen_rerank_topn, 1),
+                'scored_count': 0,
+                'error': None,
+            })
             return {}
         limited = candidates[:max(self._qwen_rerank_topn, 1)]
         paper_lines = []
+        candidate_ids: List[int] = []
         for item in limited:
             p = self._paper_by_id.get(int(item['id']))
             if not p:
                 continue
+            candidate_ids.append(int(p.id))
             abstract = (p.abstract or '')[:450].replace('\n', ' ')
             keywords = ', '.join(p.keywords or [])
             paper_lines.append(
                 f"ID: {p.id}\nTitle: {p.title}\nYear: {p.year or ''}\nKeywords: {keywords}\nAbstract: {abstract}"
             )
         if not paper_lines:
+            self._set_last_rerank_debug({
+                'status': 'no_candidates',
+                'query': query,
+                'rerank_enabled': self.qwen_rerank_enabled,
+                'candidate_count': len(candidates),
+                'topn_requested': max(self._qwen_rerank_topn, 1),
+                'candidate_ids': [],
+                'scored_count': 0,
+                'error': None,
+            })
             return {}
         system_prompt = (
             'You rerank academic paper search results. '
@@ -1750,9 +1812,30 @@ class SearchEngine:
                     continue
                 if pid in self._paper_by_id:
                     out[pid] = float(np.clip(score, 0.0, 1.0))
+            self._set_last_rerank_debug({
+                'status': 'success' if out else 'empty',
+                'query': query,
+                'rerank_enabled': self.qwen_rerank_enabled,
+                'candidate_count': len(candidates),
+                'topn_requested': max(self._qwen_rerank_topn, 1),
+                'candidate_ids': candidate_ids,
+                'scored_count': len(out),
+                'scored_ids': list(out.keys()),
+                'error': None,
+            })
             return out
         except Exception as exc:
             self._logger.warning('Qwen rerank failed, keep local ranking: %s', exc)
+            self._set_last_rerank_debug({
+                'status': 'error',
+                'query': query,
+                'rerank_enabled': self.qwen_rerank_enabled,
+                'candidate_count': len(candidates),
+                'topn_requested': max(self._qwen_rerank_topn, 1),
+                'candidate_ids': candidate_ids,
+                'scored_count': 0,
+                'error': str(exc),
+            })
             return {}
 
     def _rank_cache_key(
@@ -1847,6 +1930,29 @@ class SearchEngine:
                 'semantic_enabled': semantic_enabled,
                 'cache_hit': True,
             }
+            self._set_last_author_debug({
+                'status': 'cache_hit',
+                'query': query,
+                'retrieval_query': None,
+                'author_query': None,
+                'author_recall_enabled': False,
+                'author_candidate_count': 0,
+                'author_result_count': 0,
+                'author_recall_ms': 0.0,
+            })
+            self._set_last_rerank_debug({
+                'status': 'cache_hit',
+                'query': query,
+                'rerank_enabled': self.qwen_rerank_enabled,
+                'candidate_count': 0,
+                'topn_requested': max(self._qwen_rerank_topn, 1),
+                'candidate_ids': [],
+                'scored_count': 0,
+                'scored_ids': [],
+                'blended_count': 0,
+                'rerank_ms': 0.0,
+                'error': None,
+            })
             self._set_last_rewrite_debug({
                 'status': 'cache_hit',
                 'cache_hit': True,
@@ -1890,6 +1996,7 @@ class SearchEngine:
         retrieval_query = parsed.retrieval_query
         query_low = retrieval_query.lower().strip()
         author_recall_enabled = self._author_intent_enabled(parsed)
+        author_query: Optional[str] = None
 
         raw_payload: Dict[str, Any] = {
             'merged_scores': {},
@@ -2019,9 +2126,21 @@ class SearchEngine:
         raw_scores = dict(raw_payload.get('merged_scores') or {})
         raw_fts_scores = dict(raw_payload.get('raw_fts_scores') or {})
         raw_fts_top_score = max((float(v) for v in raw_fts_scores.values()), default=0.0)
+        author_recall_ms = 0.0
         query_rewrite_ms = 0.0
         if timer:
+            author_recall_ms = float(timer.to_dict().get('by_step_ms', {}).get('author_recall', 0.0) or 0.0)
             query_rewrite_ms = float(timer.to_dict().get('by_step_ms', {}).get('query_rewrite', 0.0) or 0.0)
+        self._set_last_author_debug({
+            'status': 'executed' if author_recall_enabled else 'skipped',
+            'query': query,
+            'retrieval_query': retrieval_query,
+            'author_query': author_query,
+            'author_recall_enabled': author_recall_enabled,
+            'author_candidate_count': len(author_scores),
+            'author_result_count': len(author_scores),
+            'author_recall_ms': round(author_recall_ms, 3),
+        })
         self._set_last_rewrite_debug({
             'status': rewrite_status,
             'cache_hit': False,
@@ -2189,12 +2308,14 @@ class SearchEngine:
             scored.sort(key=lambda x: x['final_score'], reverse=True)
         with _timed_step(timer, 'rerank'):
             qwen_scores = self._qwen_rerank(retrieval_query, scored)
+        blended_count = 0
         if qwen_scores:
             with _timed_step(timer, 'blend_qwen_scores'):
                 for item in scored:
                     qwen_score = qwen_scores.get(int(item['id']))
                     if qwen_score is None:
                         continue
+                    blended_count += 1
                     item['qwen_score'] = round(float(qwen_score), 4)
                     blended = 0.75 * float(item['final_score']) + 0.25 * qwen_score
                     item['final_score'] = round(float(blended), 4)
@@ -2210,6 +2331,13 @@ class SearchEngine:
         if use_cache:
             with _timed_step(timer, 'rank_cache_store'):
                 self._set_rank_cache(cache_key, scored, self.semantic_enabled)
+        rerank_ms = 0.0
+        if timer:
+            rerank_ms = float(timer.to_dict().get('by_step_ms', {}).get('rerank', 0.0) or 0.0)
+        rerank_debug = self.get_last_rerank_debug()
+        rerank_debug['blended_count'] = blended_count
+        rerank_debug['rerank_ms'] = round(rerank_ms, 3)
+        self._set_last_rerank_debug(rerank_debug)
         payload = {
             'results': scored[:topk],
             'semantic_enabled': self.semantic_enabled,
