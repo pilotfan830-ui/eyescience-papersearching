@@ -1,0 +1,657 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>论文搜索</title>
+  <style>
+    :root {
+      --ink: #172033;
+      --muted: #65758b;
+      --line: #d8dee8;
+      --panel: #ffffff;
+      --page: #f5f7fb;
+      --accent: #1667c7;
+      --accent-soft: #e7f0fb;
+      --mark: #fff2a8;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      min-height: 100vh;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+      background: var(--page);
+      color: var(--ink);
+    }
+    .wrap {
+      width: min(960px, 100%);
+      min-height: 100vh;
+      margin: 0 auto;
+      padding: 24px 14px 42px;
+      display: flex;
+      flex-direction: column;
+      justify-content: center;
+    }
+    .wrap.searched { justify-content: flex-start; }
+    .search-shell { width: 100%; }
+    .brand {
+      margin: 0 0 18px;
+      text-align: center;
+      font-size: 30px;
+      line-height: 1.2;
+      font-weight: 750;
+      letter-spacing: 0;
+    }
+    .search-panel {
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 14px;
+      box-shadow: 0 8px 26px rgba(23, 32, 51, .08);
+    }
+    .search-row {
+      display: grid;
+      grid-template-columns: 1fr 96px;
+      gap: 10px;
+    }
+    input, button, select {
+      font: inherit;
+      font-size: 16px;
+      border-radius: 8px;
+    }
+    input, select {
+      min-width: 0;
+      border: 1px solid var(--line);
+      background: #fff;
+      color: var(--ink);
+    }
+    input {
+      width: 100%;
+      padding: 12px 13px;
+    }
+    button {
+      border: 0;
+      background: var(--accent);
+      color: #fff;
+      padding: 12px 14px;
+      cursor: pointer;
+      font-weight: 650;
+    }
+    button.secondary { background: #5b687a; }
+    button.ghost { background: #e7ebf1; color: var(--ink); }
+    .examples {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      align-items: center;
+      margin-top: 12px;
+      color: var(--muted);
+      font-size: 14px;
+    }
+    .example {
+      border: 1px solid var(--line);
+      background: #fff;
+      color: #24415f;
+      padding: 7px 10px;
+      border-radius: 8px;
+      cursor: pointer;
+    }
+    .filters {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+      align-items: end;
+      justify-content: space-between;
+      margin-top: 12px;
+    }
+    .filter-group {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      align-items: center;
+      color: var(--muted);
+      font-size: 14px;
+    }
+    .filter-group label { white-space: nowrap; }
+    .debug-toggle {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      color: var(--ink);
+      font-size: 13px;
+    }
+    .debug-toggle input {
+      width: 16px;
+      height: 16px;
+      margin: 0;
+    }
+    select { padding: 9px 10px; }
+    #results {
+      width: 100%;
+      margin-top: 16px;
+    }
+    .result-card {
+      background: #fff;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 14px;
+      margin-top: 12px;
+    }
+    .title { font-weight: 750; line-height: 1.35; font-size: 18px; }
+    .meta { color: var(--muted); font-size: 14px; margin-top: 6px; line-height: 1.45; }
+    .score-line { color: #49627c; font-size: 12px; margin-top: 6px; }
+    .match-debug {
+      margin-top: 6px;
+      color: #66788d;
+      font-size: 12px;
+      line-height: 1.45;
+    }
+    .keywords-line {
+      margin-top: 9px;
+      color: #405772;
+      font-size: 12px;
+      line-height: 1.45;
+    }
+    .keywords-line .lab {
+      font-weight: 700;
+      color: #243b55;
+    }
+    .cite-preview {
+      margin-top: 8px;
+      padding: 9px 11px;
+      background: var(--accent-soft);
+      border-left: 3px solid var(--accent);
+      border-radius: 8px;
+      font-size: 12px;
+      line-height: 1.48;
+      color: #304156;
+      word-break: break-word;
+    }
+    .cite-preview .lab {
+      font-weight: 700;
+      color: #1d4f86;
+      font-size: 12px;
+      margin-bottom: 4px;
+    }
+    .card-actions {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      justify-content: flex-end;
+      gap: 8px;
+      margin-top: 10px;
+    }
+    .link {
+      color: var(--accent);
+      cursor: pointer;
+      text-decoration: underline;
+      font-weight: 650;
+      background: transparent;
+      border-radius: 0;
+      padding: 0;
+      margin-right: auto;
+      font-size: 13px;
+    }
+    .action-btn {
+      padding: 9px 10px;
+      border-radius: 8px;
+      font-size: 13px;
+      line-height: 1.2;
+      width: auto;
+    }
+    .action-btn.secondary { background: #5b687a; }
+    .action-btn.ghost { background: #e7ebf1; color: var(--ink); }
+    .action-btn:disabled {
+      cursor: wait;
+      opacity: .68;
+    }
+    .hl {
+      background: var(--mark);
+      color: inherit;
+      padding: 0 2px;
+      border-radius: 3px;
+    }
+    #modal-overlay {
+      display: none;
+      position: fixed;
+      inset: 0;
+      background: rgba(23, 32, 51, .46);
+      z-index: 50;
+      align-items: center;
+      justify-content: center;
+      padding: 16px;
+    }
+    #modal-overlay.open { display: flex; }
+    .modal {
+      background: #fff;
+      border-radius: 8px;
+      max-width: 680px;
+      width: 100%;
+      max-height: 90vh;
+      display: flex;
+      flex-direction: column;
+      box-shadow: 0 20px 50px rgba(0, 0, 0, .2);
+    }
+    .modal-head {
+      padding: 14px 16px;
+      border-bottom: 1px solid var(--line);
+      font-weight: 750;
+      font-size: 17px;
+    }
+    .modal-body {
+      padding: 14px 16px;
+      overflow: auto;
+      flex: 1;
+      font-size: 14px;
+      line-height: 1.5;
+    }
+    .modal-body dl { margin: 0; }
+    .modal-body dt { font-weight: 700; color: #374151; margin-top: 10px; }
+    .modal-body dt:first-child { margin-top: 0; }
+    .modal-body dd { margin: 4px 0 0 0; white-space: pre-wrap; word-break: break-word; }
+    .citation-block {
+      background: #f8fafc;
+      border-radius: 8px;
+      padding: 12px;
+      border: 1px solid #e2e8f0;
+      margin-top: 6px;
+    }
+    .modal-foot {
+      padding: 12px 16px;
+      border-top: 1px solid var(--line);
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      justify-content: flex-end;
+    }
+    .modal-foot button {
+      width: auto;
+      margin: 0;
+      padding: 10px 14px;
+      font-size: 14px;
+    }
+    .toast {
+      position: fixed;
+      bottom: 24px;
+      left: 50%;
+      transform: translateX(-50%);
+      background: #1f2937;
+      color: #fff;
+      padding: 10px 18px;
+      border-radius: 8px;
+      font-size: 14px;
+      z-index: 60;
+      display: none;
+    }
+    .toast.show { display: block; }
+    .empty {
+      margin-top: 16px;
+      color: var(--muted);
+      text-align: center;
+    }
+    @media (max-width: 640px) {
+      .brand { font-size: 26px; }
+      .search-row { grid-template-columns: 1fr; }
+      .card-actions { justify-content: stretch; }
+      .card-actions .link { width: 100%; margin-right: 0; }
+      .action-btn { flex: 1 1 140px; }
+      .filters { align-items: stretch; }
+      .filter-group { width: 100%; }
+      .filter-group select { flex: 1; }
+      button { width: 100%; }
+    }
+  </style>
+</head>
+<body>
+  <div class="wrap" id="wrap">
+    <div class="search-shell">
+      <h1 class="brand">论文搜索</h1>
+      <div class="search-panel">
+        <div class="search-row">
+          <input id="q" placeholder="输入关键词、疾病、术式或自然语言问题" />
+          <button id="search-btn" type="button" onclick="doSearch()">搜索</button>
+        </div>
+        <div class="examples">
+          <span>搜索示例</span>
+          <span class="example" onclick="useExample('cataract')">关键词：cataract</span>
+          <span class="example" onclick="useExample('cataract surgery')">短语：cataract surgery</span>
+          <span class="example" onclick="useExample('high myopia near visual acuity')">主题：high myopia near visual acuity</span>
+          <span class="example" onclick="useExample('白内障手术')">中文：白内障手术</span>
+        </div>
+        <div class="filters">
+          <div class="filter-group">
+            <label for="year-from">时间范围</label>
+            <select id="year-from">
+              <option value="">不限</option>
+              <option value="2024">2024</option>
+              <option value="2025">2025</option>
+              <option value="2026">2026</option>
+            </select>
+            <span>至</span>
+            <select id="year-to">
+              <option value="">不限</option>
+              <option value="2024">2024</option>
+              <option value="2025">2025</option>
+              <option value="2026">2026</option>
+            </select>
+          </div>
+          <div class="filter-group">
+            <label for="sort">排序</label>
+            <select id="sort">
+              <option value="best_match">最佳匹配</option>
+              <option value="most_recent">最新优先</option>
+            </select>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="filters" style="margin-top:12px">
+      <div class="filter-group">
+        <label class="debug-toggle" for="show-match-debug">
+          <input id="show-match-debug" type="checkbox" />
+          <span>显示匹配明细</span>
+        </label>
+      </div>
+    </div>
+
+    <div id="results"></div>
+  </div>
+
+  <div id="modal-overlay" onclick="if(event.target===this) closeModal()">
+    <div class="modal" onclick="event.stopPropagation()">
+      <div class="modal-head" id="modal-title">论文详情</div>
+      <div class="modal-body" id="modal-body"></div>
+      <div class="modal-foot">
+        <button type="button" class="ghost" onclick="copyAllDetail()">复制全部论文信息</button>
+        <button type="button" class="secondary" onclick="copyCitationOnly()">复制引用信息</button>
+        <button type="button" onclick="downloadEndNote()">下载 EndNote (.enw)</button>
+      </div>
+    </div>
+  </div>
+  <div id="toast" class="toast"></div>
+
+  <script>
+    const API = window.location.protocol === 'file:'
+      ? 'http://127.0.0.1:0421/api'
+      : `${window.location.origin}/api`;
+
+    let detailCache = null;
+    let lastSearchData = null;
+    let showMatchDebug = false;
+
+    function esc(s) {
+      if (s == null || s === '') return '';
+      return String(s)
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;');
+    }
+
+    function toast(msg) {
+      const t = document.getElementById('toast');
+      t.textContent = msg;
+      t.classList.add('show');
+      clearTimeout(toast._tid);
+      toast._tid = setTimeout(() => t.classList.remove('show'), 2200);
+    }
+
+    function useExample(text) {
+      document.getElementById('q').value = text;
+      doSearch();
+    }
+
+    function escapeRegExp(s) {
+      return String(s).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    }
+
+    function buildHighlightTerms(query) {
+      const q = String(query || '').trim();
+      if (!q) return [];
+      const terms = [q];
+      q.split(/\s+/).forEach(t => {
+        const x = t.trim();
+        if (x.length >= 2) terms.push(x);
+      });
+      return [...new Set(terms)].sort((a, b) => b.length - a.length);
+    }
+
+    function highlightText(text, query) {
+      const raw = String(text || '');
+      const terms = buildHighlightTerms(query);
+      if (!terms.length) return esc(raw);
+      const pattern = new RegExp(`(${terms.map(escapeRegExp).join('|')})`, 'ig');
+      const parts = raw.split(pattern);
+      return parts.map((part, i) => (i % 2 === 1 ? `<mark class="hl">${esc(part)}</mark>` : esc(part))).join('');
+    }
+
+    function searchParams(q) {
+      const params = new URLSearchParams();
+      params.set('q', q);
+      params.set('limit', '20');
+      const from = document.getElementById('year-from').value;
+      const to = document.getElementById('year-to').value;
+      const sort = document.getElementById('sort').value;
+      if (from) params.set('year_from', from);
+      if (to) params.set('year_to', to);
+      params.set('sort', sort);
+      return params.toString();
+    }
+
+    function formatMatchDebug(x) {
+      const debug = x.match_debug || {};
+      const parts = [
+        `raw FTS ${Number(debug.raw_fts_score || 0).toFixed(3)}`,
+        `rewrite FTS ${Number(debug.rewrite_fts_score || 0).toFixed(3)}`,
+        `embedding ${Number(debug.embedding_score || 0).toFixed(3)}`,
+        `author ${Number(debug.author_score || 0).toFixed(3)}`,
+      ];
+      return `<div class="match-debug">来源: ${parts.map(esc).join(' | ')}</div>`;
+    }
+
+    function renderResult(x, q) {
+      const matchPercent = Math.round(Math.max(0, Math.min(1, Number(x.final_score) || 0)) * 100);
+      const keywords = Array.isArray(x.keywords) && x.keywords.length
+        ? x.keywords.join(', ')
+        : '暂无关键词';
+      const citation = (x.citation || x.citation_snippet || '').trim();
+      return `
+        <div class="result-card">
+          <div class="title">${highlightText(x.title, q)}</div>
+          <div class="meta">${esc(x.authors || '-')} | ${esc(String(x.year ?? '-'))}</div>
+          <div class="score-line">综合匹配度 ${matchPercent}%</div>
+          ${showMatchDebug ? formatMatchDebug(x) : ''}
+          <div class="keywords-line"><span class="lab">关键词</span> ${highlightText(keywords, q)}</div>
+          <div class="cite-preview"><div class="lab">引用预览</div>${citation ? highlightText(citation, q) : '（本条暂无引用信息）'}</div>
+          <div class="card-actions">
+            <span class="link" onclick="showDetail(${x.id})">查看详情</span>
+            <button type="button" class="action-btn ghost" onclick="copyAllDetailById(${x.id}, this)">复制全文</button>
+            <button type="button" class="action-btn secondary" onclick="copyCitationById(${x.id}, this)">复制引用</button>
+            <button type="button" class="action-btn" onclick="downloadEndNoteById(${x.id})">下载 EndNote</button>
+          </div>
+        </div>`;
+    }
+
+    function renderResults(data, q) {
+      const root = document.getElementById('results');
+      if (!data.items || !data.items.length) {
+        root.innerHTML = '<div class="empty">没有找到匹配论文。</div>';
+        return;
+      }
+      root.innerHTML = data.items.map(x => renderResult(x, q)).join('');
+    }
+
+    async function doSearch() {
+      const q = document.getElementById('q').value.trim();
+      if (!q) return;
+      document.getElementById('wrap').classList.add('searched');
+      const root = document.getElementById('results');
+      root.innerHTML = '<div class="empty">搜索中...</div>';
+      try {
+        const data = await fetch(`${API}/search?${searchParams(q)}`).then(r => r.json());
+        lastSearchData = data;
+        renderResults(data, q);
+      } catch (err) {
+        root.innerHTML = '<div class="empty">搜索失败，请确认后端服务正在运行。</div>';
+      }
+    }
+
+    async function copyText(text) {
+      const v = text || '';
+      try {
+        await navigator.clipboard.writeText(v);
+        toast('已复制到剪贴板');
+      } catch {
+        try {
+          const ta = document.createElement('textarea');
+          ta.value = v;
+          document.body.appendChild(ta);
+          ta.select();
+          document.execCommand('copy');
+          document.body.removeChild(ta);
+          toast('已复制到剪贴板');
+        } catch {
+          toast('复制失败，请手动选择文本复制');
+        }
+      }
+    }
+
+    function formatAllDetail(d) {
+      const lines = [
+        `标题: ${d.title || ''}`,
+        `作者: ${(d.authors || []).join(', ')}`,
+        `年份: ${d.year ?? '-'}`,
+        `关键词: ${(d.keywords || []).join(', ')}`,
+        `DOI: ${d.doi || '-'}`,
+        `网址: ${d.url || '-'}`,
+        '',
+        '摘要:',
+        d.abstract || '',
+        '',
+        '引用:',
+        d.citation || '（暂无）',
+      ];
+      return lines.join('\n');
+    }
+
+    function renderDetailBody(d) {
+      const citeHtml = d.citation
+        ? esc(d.citation)
+        : '<span style="color:#94a3b8">（数据库中该条 citation 为空）</span>';
+      return `
+        <dl>
+          <dt>标题</dt><dd>${esc(d.title)}</dd>
+          <dt>作者</dt><dd>${esc((d.authors || []).join(', '))}</dd>
+          <dt>年份</dt><dd>${esc(String(d.year ?? '-'))}</dd>
+          <dt>关键词</dt><dd>${esc((d.keywords || []).join(', '))}</dd>
+          <dt>DOI</dt><dd>${esc(d.doi || '-')}</dd>
+          <dt>网址</dt><dd>${d.url ? `<a href="${esc(d.url)}" target="_blank" rel="noopener">${esc(d.url)}</a>` : '-'}</dd>
+          <dt>摘要</dt><dd>${esc(d.abstract || '')}</dd>
+          <dt>引用</dt><dd class="citation-block">${citeHtml}</dd>
+        </dl>`;
+    }
+
+    async function showDetail(id) {
+      const d = await getPaperDetail(id);
+      detailCache = d;
+      document.getElementById('modal-title').textContent = d.title || '论文详情';
+      document.getElementById('modal-body').innerHTML = renderDetailBody(d);
+      document.getElementById('modal-overlay').classList.add('open');
+    }
+
+    async function getPaperDetail(id) {
+      return fetch(`${API}/papers/${id}`).then(r => r.json());
+    }
+
+    async function withLoading(btn, label, fn) {
+      if (!btn) return fn();
+      const old = btn.textContent;
+      btn.disabled = true;
+      btn.textContent = label;
+      try {
+        return await fn();
+      } finally {
+        btn.disabled = false;
+        btn.textContent = old;
+      }
+    }
+
+    async function copyAllDetailById(id, btn) {
+      await withLoading(btn, '复制中...', async () => {
+        const d = await getPaperDetail(id);
+        await copyText(formatAllDetail(d));
+      });
+    }
+
+    async function copyCitationById(id, btn) {
+      await withLoading(btn, '复制中...', async () => {
+        const d = await getPaperDetail(id);
+        const c = (d.citation || '').trim();
+        if (!c) {
+          toast('当前论文没有引用文本');
+          return;
+        }
+        await copyText(c);
+      });
+    }
+
+    function downloadEndNoteById(id) {
+      const a = document.createElement('a');
+      a.href = `${API}/export/${id}.enw`;
+      a.download = `paper_${id}.enw`;
+      a.rel = 'noopener';
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      toast('已开始下载 EndNote 文件');
+    }
+
+    function closeModal() {
+      document.getElementById('modal-overlay').classList.remove('open');
+    }
+
+    function copyAllDetail() {
+      if (!detailCache) return;
+      copyText(formatAllDetail(detailCache));
+    }
+
+    function copyCitationOnly() {
+      if (!detailCache) return;
+      const c = (detailCache.citation || '').trim();
+      if (!c) {
+        toast('当前论文没有引用文本');
+        return;
+      }
+      copyText(c);
+    }
+
+    function downloadEndNote() {
+      if (!detailCache) return;
+      downloadEndNoteById(detailCache.id);
+    }
+
+    document.getElementById('q').addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') doSearch();
+    });
+    document.getElementById('sort').addEventListener('change', () => {
+      if (document.getElementById('q').value.trim()) doSearch();
+    });
+    document.getElementById('show-match-debug').addEventListener('change', (e) => {
+      showMatchDebug = !!e.target.checked;
+      if (lastSearchData && document.getElementById('q').value.trim()) {
+        renderResults(lastSearchData, document.getElementById('q').value.trim());
+      }
+    });
+    document.getElementById('year-from').addEventListener('change', () => {
+      if (document.getElementById('q').value.trim()) doSearch();
+    });
+    document.getElementById('year-to').addEventListener('change', () => {
+      if (document.getElementById('q').value.trim()) doSearch();
+    });
+    document.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape') closeModal();
+    });
+  </script>
+</body>
+</html>
