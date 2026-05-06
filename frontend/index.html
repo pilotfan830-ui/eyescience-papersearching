@@ -12,6 +12,10 @@
       --panel: #ffffff;
       --page: #f5f7fb;
       --accent: #1667c7;
+      --link-blue: #1d4f86;
+      --link-blue-hover: #163a63;
+      --topbar-offset: 126px;
+      --footer-space: 74px;
       --accent-soft: #e7f0fb;
       --mark: #fff2a8;
     }
@@ -19,20 +23,27 @@
     body {
       margin: 0;
       min-height: 100vh;
+      display: flex;
+      flex-direction: column;
       font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
       background: var(--page);
       color: var(--ink);
     }
     .wrap {
       width: min(960px, 100%);
-      min-height: 100vh;
+      min-height: calc(100vh - var(--topbar-offset) - var(--footer-space));
       margin: 0 auto;
-      padding: 24px 14px 42px;
+      margin-top: var(--topbar-offset);
+      padding: 16px 14px 18px;
       display: flex;
+      flex: 1 0 auto;
       flex-direction: column;
       justify-content: center;
     }
-    .wrap.searched { justify-content: flex-start; }
+    .wrap.searched { 
+      justify-content: flex-start;
+      padding-top: 24px;
+    }
     .search-shell { width: 100%; }
     .brand {
       margin: 0 0 18px;
@@ -137,7 +148,27 @@
       padding: 14px;
       margin-top: 12px;
     }
-    .title { font-weight: 750; line-height: 1.35; font-size: 18px; }
+    .title { font-weight: 750; line-height: 1.35; font-size: 18px; color: inherit; }
+    .title-link {
+      display: inline-block;
+      padding: 0;
+      border: 0;
+      background: transparent;
+      color: var(--link-blue);
+      text-decoration: none;
+      cursor: pointer;
+      text-align: left;
+    }
+    .title-link:hover {
+      color: var(--link-blue-hover);
+      text-decoration: underline;
+    }
+    .title-link:focus-visible,
+    .feedback-btn:focus-visible,
+    .link:focus-visible {
+      outline: 2px solid rgba(29, 79, 134, .28);
+      outline-offset: 3px;
+    }
     .meta { color: var(--muted); font-size: 14px; margin-top: 6px; line-height: 1.45; }
     .score-line { color: #49627c; font-size: 12px; margin-top: 6px; }
     .match-debug {
@@ -187,6 +218,7 @@
       text-decoration: underline;
       font-weight: 650;
       background: transparent;
+      border: 0;
       border-radius: 0;
       padding: 0;
       margin-right: auto;
@@ -237,6 +269,7 @@
       border-bottom: 1px solid var(--line);
       font-weight: 750;
       font-size: 17px;
+      color: var(--link-blue);
     }
     .modal-body {
       padding: 14px 16px;
@@ -289,7 +322,87 @@
       color: var(--muted);
       text-align: center;
     }
+    .topbar {
+      position: fixed;
+      top: 0;
+      left: 50%;
+      transform: translateX(-50%);
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+      padding: 10px 14px 12px;
+      background: var(--page);
+      z-index: 40;
+      border-bottom: 1px solid var(--line);
+      width: min(calc(960px + 28px), 100%);
+      box-sizing: border-box;
+    }
+    .topbar-tools {
+      display: flex;
+      justify-content: flex-end;
+    }
+    .feedback-btn {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      padding: 8px 12px;
+      border: 1px solid #bdd4ee;
+      border-radius: 999px;
+      background: #fff;
+      color: var(--link-blue);
+      text-decoration: none;
+      font-size: 13px;
+      font-weight: 650;
+      line-height: 1.2;
+      white-space: nowrap;
+      box-shadow: 0 4px 16px rgba(17, 63, 117, .08);
+    }
+    .logo-group {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+      gap: 14px;
+      align-items: center;
+      min-width: 0;
+    }
+    .logo-item {
+      display: flex;
+      align-items: center;
+      justify-content: flex-start;
+      min-width: 0;
+    }
+    .logo-item:first-child {
+      border-right: 2px solid #1667c7;
+      padding-right: 14px;
+    }
+    .logo-item:last-child {
+      padding-left: 14px;
+    }
+    .logo-item img {
+      display: block;
+      width: 100%;
+      max-width: 100%;
+      height: auto;
+      max-height: 48px;
+      object-fit: contain;
+      object-position: left center;
+    }
+    .logo-item.large img {
+      max-height: 58px;
+    }
+    footer {
+      text-align: center;
+      padding: 16px 14px 18px;
+      color: #999;
+      font-size: 12px;
+      line-height: 1.6;
+      border-top: 1px solid var(--line);
+      margin-top: 0;
+    }
     @media (max-width: 640px) {
+      :root {
+        --topbar-offset: 112px;
+        --footer-space: 76px;
+      }
       .brand { font-size: 26px; }
       .search-row { grid-template-columns: 1fr; }
       .card-actions { justify-content: stretch; }
@@ -299,10 +412,54 @@
       .filter-group { width: 100%; }
       .filter-group select { flex: 1; }
       button { width: 100%; }
+      .wrap {
+        min-height: auto;
+      }
+      .wrap.searched {
+        padding-top: 24px;
+      }
+      .topbar {
+        gap: 8px;
+        padding: 8px 12px 10px;
+      }
+      .feedback-btn {
+        width: auto;
+        max-width: 100%;
+        padding: 7px 10px;
+        font-size: 12px;
+      }
+      .logo-group {
+        gap: 10px;
+      }
+      .logo-item:first-child {
+        padding-right: 10px;
+      }
+      .logo-item:last-child {
+        padding-left: 10px;
+      }
+      .logo-item img {
+        max-height: 28px;
+      }
+      .logo-item.large img {
+        max-height: 36px;
+      }
     }
   </style>
 </head>
 <body>
+  <div class="topbar">
+    <div class="topbar-tools">
+      <a class="feedback-btn" href="mailto:ykxb@gzzoc.com?subject=%E8%AE%BA%E6%96%87%E6%90%9C%E7%B4%A2%E5%B7%A5%E5%85%B7%E9%97%AE%E9%A2%98%E5%8F%8D%E9%A6%88">反馈邮箱：ykxb@gzzoc.com</a>
+    </div>
+    <div class="logo-group">
+      <div class="logo-item">
+        <img src="/static/zoc.png" alt="ZOC" title="ZOC" onerror="this.onerror=null;this.src='zoc.png';" />
+      </div>
+      <div class="logo-item large">
+        <img src="/static/es.png" alt="ES" title="ES" onerror="this.onerror=null;this.src='es.png';" />
+      </div>
+    </div>
+  </div>
   <div class="wrap" id="wrap">
     <div class="search-shell">
       <h1 class="brand">论文搜索</h1>
@@ -457,8 +614,10 @@
         : '暂无关键词';
       const citation = (x.citation || x.citation_snippet || '').trim();
       return `
-        <div class="result-card">
-          <div class="title">${highlightText(x.title, q)}</div>
+        <div class="result-card" id="paper-${x.id}">
+          <a class="title-link" href="#paper-${x.id}" onclick="showDetail(${x.id}); return false;">
+            <span class="title">${highlightText(x.title, q)}</span>
+          </a>
           <div class="meta">${esc(x.authors || '-')} | ${esc(String(x.year ?? '-'))}</div>
           <div class="score-line">综合匹配度 ${matchPercent}%</div>
           ${showMatchDebug ? formatMatchDebug(x) : ''}
@@ -653,5 +812,8 @@
       if (e.key === 'Escape') closeModal();
     });
   </script>
+  <footer>
+    © 中山大学中山眼科中心 | Eye Science | 版权所有
+  </footer>
 </body>
 </html>

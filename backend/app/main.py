@@ -5,6 +5,7 @@ import uvicorn
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, PlainTextResponse, Response
+from fastapi.staticfiles import StaticFiles
 
 from .schemas import PaperDetail, SearchResponse
 from .search_engine import SearchEngine
@@ -12,6 +13,10 @@ from .search_engine import SearchEngine
 app = FastAPI(title='Paper Search API', version='0.1.0')
 engine = SearchEngine()
 FRONTEND_INDEX = Path(__file__).resolve().parents[2] / 'frontend' / 'index.html'
+FRONTEND_DIR = FRONTEND_INDEX.parent
+
+if FRONTEND_DIR.exists():
+    app.mount('/static', StaticFiles(directory=FRONTEND_DIR), name='static')
 
 app.add_middleware(
     CORSMiddleware,
