@@ -1067,6 +1067,59 @@ class SearchEngine:
     def _contains_cjk(self, text: str) -> bool:
         return bool(re.search(r'[\u4e00-\u9fff]', text or ''))
 
+    def _is_short_ascii_token_query(self, text: str) -> bool:
+        return bool(re.fullmatch(r'[A-Za-z]{1,4}', (text or '').strip()))
+
+    def _text_matches_query(self, text: str, query: str) -> bool:
+        haystack = (text or '').lower()
+        needle = (query or '').strip().lower()
+        if not haystack or not needle:
+            return False
+        if self._is_short_ascii_token_query(needle):
+            return bool(re.search(rf'(?<![a-z0-9]){re.escape(needle)}(?![a-z0-9])', haystack))
+        return needle in haystack
+
+    def _term_match_priority(self, query: str, term: str) -> tuple[int, int]:
+        q = (query or '').strip().lower()
+        t = (term or '').strip().lower()
+        return (1 if q == t else 0, len(t))
+
+    def _expansion_priority(self, query: str, source_term: str, candidate: str) -> tuple[int, int]:
+        q = (query or '').strip()
+        source = (source_term or '').strip().lower()
+        text = re.sub(r'\s+', ' ', str(candidate or '').strip())
+        has_cjk = self._contains_cjk(text)
+        ascii_tokens = re.findall(r'[A-Za-z]+(?:-[A-Za-z]+)?', text)
+        ascii_chars = len(''.join(ascii_tokens))
+        is_ascii_phrase = bool(ascii_tokens) and not has_cjk and ascii_chars > 4
+        is_short_ascii = bool(ascii_tokens) and not has_cjk and ascii_chars <= 4
+
+        lang_score = 0
+        if self._is_short_ascii_token_query(q):
+            if is_ascii_phrase:
+                lang_score = 4
+            elif has_cjk:
+                lang_score = 3
+            elif is_short_ascii:
+                lang_score = 2
+        elif self._contains_cjk(q):
+            if is_ascii_phrase:
+                lang_score = 4
+            elif is_short_ascii:
+                lang_score = 3
+            elif has_cjk:
+                lang_score = 2
+        else:
+            if has_cjk:
+                lang_score = 3
+            elif is_ascii_phrase:
+                lang_score = 2
+            elif is_short_ascii:
+                lang_score = 1
+
+        source_score = 1 if source == q.lower() else 0
+        return (source_score, lang_score)
+
     def _fallback_terms(self, query: str) -> List[str]:
         q = (query or '').strip()
         if not q:
@@ -1158,14 +1211,47 @@ class SearchEngine:
             '泪器病': ['lacrimal disease', 'lacrimal', 'nasolacrimal', 'lacrimal duct'],
             '泪器': ['lacrimal', 'nasolacrimal', 'lacrimal duct'],
         }
-        expansions: List[str] = []
-        for term, mapped in synonym_map.items():
-            if term in q:
-                expansions.extend(mapped)
-            for candidate in mapped:
-                if candidate in q:
-                    expansions.append(term)
-        return list(dict.fromkeys(expansions))
+        direct_expansions: List[str] = []
+        reverse_expansions: List[str] = []
+
+        matched_terms = [
+            (idx, term, mapped)
+            for idx, (term, mapped) in enumerate(synonym_map.items())
+            if self._text_matches_query(q, term)
+        ]
+        matched_terms.sort(
+            key=lambda item: (
+                -self._term_match_priority(q, item[1])[0],
+                -self._term_match_priority(q, item[1])[1],
+                item[0],
+            )
+        )
+        for _, term, mapped in matched_terms:
+            ranked_candidates = sorted(
+                enumerate(mapped),
+                key=lambda item: (
+                    -self._expansion_priority(q, term, item[1])[0],
+                    -self._expansion_priority(q, term, item[1])[1],
+                    item[0],
+                ),
+            )
+            direct_expansions.extend(candidate for _, candidate in ranked_candidates)
+
+        reverse_matches = [
+            (idx, term, mapped)
+            for idx, (term, mapped) in enumerate(synonym_map.items())
+            if any(self._text_matches_query(q, candidate) for candidate in mapped)
+        ]
+        reverse_matches.sort(
+            key=lambda item: (
+                -self._term_match_priority(q, item[1])[0],
+                -self._term_match_priority(q, item[1])[1],
+                item[0],
+            )
+        )
+        for _, term, _ in reverse_matches:
+            reverse_expansions.append(term)
+        return list(dict.fromkeys(direct_expansions + reverse_expansions))
 
     def lexical_fallback_retrieve(self, query: str, topn: int = 100) -> Dict[int, float]:
         terms = self._fallback_terms(query)
@@ -1174,7 +1260,7 @@ class SearchEngine:
         scored: List[tuple[int, float]] = []
         for p in self.papers:
             text = f"{p.title} {' '.join(p.keywords)} {p.abstract}".lower()
-            hits = sum(1 for t in terms if t and t.lower() in text)
+            hits = sum(1 for t in terms if t and self._text_matches_query(text, t))
             if hits > 0:
                 scored.append((p.id, hits / max(len(terms), 1)))
         scored.sort(key=lambda x: x[1], reverse=True)
@@ -1194,10 +1280,10 @@ class SearchEngine:
             query_parts = [x for x in raw_query.split() if x]
             if raw_query and any(raw_query == keyword for keyword in keywords):
                 best = 1.0
-            elif raw_query and raw_query in joined:
+            elif raw_query and self._text_matches_query(joined, raw_query):
                 best = 0.9
             elif len(query_parts) > 1:
-                matched = sum(1 for part in query_parts if part in joined)
+                matched = sum(1 for part in query_parts if self._text_matches_query(joined, part))
                 best = 0.35 * (matched / len(query_parts)) if matched else 0.0
             else:
                 best = 0.0
@@ -1208,6 +1294,9 @@ class SearchEngine:
                     for keyword in keywords:
                         if t == keyword:
                             best = max(best, 1.0)
+                        elif self._is_short_ascii_token_query(t):
+                            if self._text_matches_query(keyword, t):
+                                best = max(best, 0.85)
                         elif t in keyword or keyword in t:
                             best = max(best, 0.85)
             if best > 0:
@@ -1229,14 +1318,14 @@ class SearchEngine:
             score = 0.0
             if surname and self._has_cjk_author_surname(p, surname):
                 score = max(score, 0.92)
-            if raw_query and raw_query in author_text:
+            if raw_query and self._text_matches_query(author_text, raw_query):
                 score = 1.0
             latin_terms = [
                 t for t in re.findall(r'[a-z]+', raw_query)
                 if len(t) >= 2 and t not in {'the', 'and', 'for', 'paper', 'article', 'recent', 'years'}
             ]
             if latin_terms:
-                matched = sum(1 for t in latin_terms if t in author_text)
+                matched = sum(1 for t in latin_terms if self._text_matches_query(author_text, t))
                 if matched:
                     score = max(score, matched / len(latin_terms))
             cjk_terms = [
@@ -1344,6 +1433,8 @@ class SearchEngine:
         name_norm = self._normalize_author_match_text(name)
         if not name_norm:
             return False
+        if re.fullmatch(r'[a-z]{1,4}', name_norm):
+            return False
         for paper in self.papers:
             author_text = ' '.join(paper.authors or [])
             if name_norm in self._normalize_author_match_text(author_text):
@@ -1430,6 +1521,8 @@ class SearchEngine:
             return True
         if re.search(r'(?:作者|教授|医生|医师|主任|院长|老师|by\s+|author\s*:?)', raw, flags=re.IGNORECASE):
             return True
+        if self._is_short_ascii_token_query(raw) and self._local_query_expansions(raw):
+            return False
         if raw and len(raw) <= 24 and self._known_author_name(raw):
             return True
         return False
@@ -2290,8 +2383,8 @@ class SearchEngine:
 
                 title_low = (p.title or '').lower()
                 keywords_low = [k.lower() for k in (p.keywords or [])]
-                title_hit = 1.0 if query_low and query_low in title_low else 0.0
-                keyword_hit = 1.0 if query_low and any(query_low in k for k in keywords_low) else 0.0
+                title_hit = 1.0 if query_low and self._text_matches_query(title_low, query_low) else 0.0
+                keyword_hit = 1.0 if query_low and any(self._text_matches_query(k, query_low) for k in keywords_low) else 0.0
 
                 feature = candidate_features.get(pid) or {}
                 raw_fts_score = float(feature.get('raw_fts_score', 0.0))
