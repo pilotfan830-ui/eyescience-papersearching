@@ -440,6 +440,7 @@ class AnalyticsStore:
         )
         stmt = (
             select(
+                self.events.c.id.label('search_event_id'),
                 self.events.c.occurred_at,
                 self.events.c.visitor_id,
                 self.events.c.query_raw,
@@ -457,8 +458,18 @@ class AnalyticsStore:
             .order_by(self.events.c.occurred_at.desc(), self.events.c.id.desc())
         )
         with self._engine.begin() as conn:
-            rows = conn.execute(stmt).mappings().all()
-        return [self._normalize_record(row) for row in rows]
+            rows = [self._normalize_record(row) for row in conn.execute(stmt).mappings().all()]
+            if not rows:
+                return rows
+            related_ids = [int(row['search_event_id']) for row in rows if row.get('search_event_id') is not None]
+            click_map = self._clicks_by_search_event(conn, related_ids)
+        for row in rows:
+            clicks = click_map.get(int(row['search_event_id']), [])
+            row['clicked_paper_count'] = len(clicks)
+            row['clicked_paper_ids'] = '; '.join(str(item['paper_id']) for item in clicks if item.get('paper_id') is not None)
+            row['clicked_paper_titles'] = '; '.join(item['paper_title'] for item in clicks if item.get('paper_title'))
+            row['clicked_at_times'] = '; '.join(item['clicked_at'] for item in clicks if item.get('clicked_at'))
+        return rows
 
     def _keyword_export_rows(
         self,
@@ -636,9 +647,10 @@ class AnalyticsStore:
     def _default_headers(self, dataset: str) -> List[str]:
         default_headers = {
             'searches': [
-                'occurred_at', 'visitor_id', 'query_raw', 'query_normalized',
+                'search_event_id', 'occurred_at', 'visitor_id', 'query_raw', 'query_normalized',
                 'year_from', 'year_to', 'sort', 'result_count', 'latency_ms',
-                'path', 'ip_hash', 'user_agent',
+                'path', 'ip_hash', 'user_agent', 'clicked_paper_count',
+                'clicked_paper_ids', 'clicked_paper_titles', 'clicked_at_times',
             ],
             'keywords': [
                 'keyword', 'searches', 'visitors', 'zero_result_searches', 'last_searched_at',
@@ -663,6 +675,34 @@ class AnalyticsStore:
 
     def _normalize_query(self, text: str) -> str:
         return ' '.join(str(text or '').strip().lower().split())
+
+    def _clicks_by_search_event(self, conn, related_ids: List[int]) -> Dict[int, List[Dict[str, Any]]]:
+        if not related_ids:
+            return {}
+        click_events = self.events.alias('click_events')
+        stmt = (
+            select(
+                click_events.c.related_search_event_id,
+                click_events.c.paper_id,
+                click_events.c.paper_title,
+                click_events.c.occurred_at.label('clicked_at'),
+            )
+            .where(
+                and_(
+                    click_events.c.event_type == 'paper_click',
+                    click_events.c.related_search_event_id.in_(related_ids),
+                )
+            )
+            .order_by(click_events.c.occurred_at.asc(), click_events.c.id.asc())
+        )
+        rows = [self._normalize_record(row) for row in conn.execute(stmt).mappings().all()]
+        grouped: Dict[int, List[Dict[str, Any]]] = {}
+        for row in rows:
+            search_event_id = row.get('related_search_event_id')
+            if search_event_id is None:
+                continue
+            grouped.setdefault(int(search_event_id), []).append(row)
+        return grouped
 
     def _ensure_missing_columns(self) -> None:
         inspector = inspect(self._engine)
