@@ -97,11 +97,11 @@ def _trim_header(value: Optional[str], limit: int = 512) -> Optional[str]:
 
 
 def _admin_username() -> str:
-    return (os.getenv('PAPER_SEARCH_ADMIN_USERNAME') or 'admin').strip() or 'admin'
+    return (os.getenv('PAPER_SEARCH_ADMIN_USERNAME') or 'eyescience').strip() or 'eyescience'
 
 
 def _admin_password() -> str:
-    return (os.getenv('PAPER_SEARCH_ADMIN_PASSWORD') or 'admin123456').strip() or 'admin123456'
+    return (os.getenv('PAPER_SEARCH_ADMIN_PASSWORD') or 'es2026').strip() or 'es2026'
 
 
 def _admin_session_secret() -> str:
