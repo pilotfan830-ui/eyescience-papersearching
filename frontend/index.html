@@ -617,7 +617,7 @@
         : '暂无关键词';
       const citation = (x.citation || x.citation_snippet || '').trim();
       return `
-        <div class="result-card" id="paper-${x.id}">
+        <div class="result-card" id="paper-${x.id}" data-paper-id="${x.id}" data-paper-title="${esc(x.title)}">
           <a class="title-link" href="#paper-${x.id}" onclick="showDetail(${x.id}); return false;">
             <span class="title">${highlightText(x.title, q)}</span>
           </a>
@@ -724,7 +724,6 @@
     async function showDetail(id) {
       const d = await getPaperDetail(id);
       detailCache = d;
-      trackPaperClick(d);
       document.getElementById('modal-title').textContent = d.title || '论文详情';
       document.getElementById('modal-body').innerHTML = renderDetailBody(d);
       document.getElementById('modal-overlay').classList.add('open');
@@ -734,21 +733,32 @@
       return fetch(`${API}/papers/${id}`).then(r => r.json());
     }
 
-    function trackPaperClick(detail) {
-      if (!detail || !lastSearchContext || !lastSearchContext.searchEventId) return;
-      fetch(`${API}/analytics/paper-click`, {
+    function sendAnalyticsEvent(url, payload) {
+      const body = JSON.stringify(payload);
+      if (navigator.sendBeacon) {
+        const blob = new Blob([body], { type: 'application/json' });
+        navigator.sendBeacon(url, blob);
+        return;
+      }
+      fetch(url, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          paper_id: detail.id,
-          paper_title: detail.title || '',
-          search_event_id: lastSearchContext.searchEventId,
-          query: lastSearchContext.query,
-          year_from: lastSearchContext.yearFrom ? Number(lastSearchContext.yearFrom) : null,
-          year_to: lastSearchContext.yearTo ? Number(lastSearchContext.yearTo) : null,
-          sort: lastSearchContext.sort || 'best_match',
-        }),
+        body,
+        keepalive: true,
       }).catch(() => {});
+    }
+
+    function trackPaperClickByMeta(paperId, paperTitle) {
+      if (!paperId || !lastSearchContext) return;
+      sendAnalyticsEvent(`${API}/analytics/paper-click`, {
+        paper_id: Number(paperId),
+        paper_title: paperTitle || '',
+        search_event_id: lastSearchContext.searchEventId || null,
+        query: lastSearchContext.query || '',
+        year_from: lastSearchContext.yearFrom ? Number(lastSearchContext.yearFrom) : null,
+        year_to: lastSearchContext.yearTo ? Number(lastSearchContext.yearTo) : null,
+        sort: lastSearchContext.sort || 'best_match',
+      });
     }
 
     async function withLoading(btn, label, fn) {
@@ -835,6 +845,11 @@
     });
     document.getElementById('year-to').addEventListener('change', () => {
       if (document.getElementById('q').value.trim()) doSearch();
+    });
+    document.getElementById('results').addEventListener('click', (e) => {
+      const card = e.target.closest('.result-card');
+      if (!card) return;
+      trackPaperClickByMeta(card.dataset.paperId, card.dataset.paperTitle || '');
     });
     document.addEventListener('keydown', (e) => {
       if (e.key === 'Escape') closeModal();
