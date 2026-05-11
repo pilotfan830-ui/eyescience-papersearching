@@ -50,3 +50,8 @@ class PaperClickRequest(BaseModel):
     year_from: Optional[int] = None
     year_to: Optional[int] = None
     sort: Optional[str] = None
+
+
+class AdminLoginRequest(BaseModel):
+    username: str
+    password: str

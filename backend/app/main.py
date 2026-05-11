@@ -2,6 +2,7 @@ import hashlib
 import os
 import secrets
 import uuid
+from urllib.parse import quote
 from datetime import date
 from pathlib import Path
 from typing import Optional
@@ -9,11 +10,11 @@ from typing import Optional
 import uvicorn
 from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, PlainTextResponse, Response
+from fastapi.responses import FileResponse, PlainTextResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 
 from .analytics import AnalyticsStore, json_bytes
-from .schemas import PaperClickRequest, PaperDetail, SearchResponse
+from .schemas import AdminLoginRequest, PaperClickRequest, PaperDetail, SearchResponse
 from .search_engine import SearchEngine
 
 app = FastAPI(title='Paper Search API', version='0.1.0')
@@ -24,6 +25,8 @@ FRONTEND_DIR = FRONTEND_INDEX.parent
 ADMIN_ANALYTICS_INDEX = FRONTEND_DIR / 'admin-analytics.html'
 VISITOR_COOKIE_NAME = 'pst_vid'
 VISITOR_COOKIE_MAX_AGE = 60 * 60 * 24 * 365
+ADMIN_COOKIE_NAME = 'pst_admin_auth'
+ADMIN_COOKIE_MAX_AGE = 60 * 60 * 8
 
 if FRONTEND_DIR.exists():
     app.mount('/static', StaticFiles(directory=FRONTEND_DIR), name='static')
@@ -93,21 +96,62 @@ def _trim_header(value: Optional[str], limit: int = 512) -> Optional[str]:
     return text[:limit]
 
 
-def _require_admin_access(request: Request) -> None:
+def _admin_username() -> str:
+    return (os.getenv('PAPER_SEARCH_ADMIN_USERNAME') or 'admin').strip() or 'admin'
+
+
+def _admin_password() -> str:
+    return (os.getenv('PAPER_SEARCH_ADMIN_PASSWORD') or 'admin123456').strip() or 'admin123456'
+
+
+def _admin_session_secret() -> str:
+    return (
+        os.getenv('PAPER_SEARCH_ADMIN_SESSION_SECRET')
+        or os.getenv('ADMIN_SESSION_SECRET')
+        or f'{app.title}:{_admin_username()}:{_admin_password()}'
+    ).strip()
+
+
+def _admin_session_value() -> str:
+    return _hash_text(f'{_admin_username()}:{_admin_password()}:{_admin_session_secret()}')
+
+
+def _is_admin_authenticated(request: Request) -> bool:
     expected = (
         os.getenv('PAPER_SEARCH_ADMIN_TOKEN')
         or os.getenv('ADMIN_TOKEN')
         or ''
     ).strip()
-    if not expected:
-        return
     provided = (
         request.headers.get('x-admin-token')
         or request.query_params.get('admin_token')
         or ''
     ).strip()
-    if not provided or not secrets.compare_digest(provided, expected):
-        raise HTTPException(status_code=401, detail='admin token required')
+    if expected and provided and secrets.compare_digest(provided, expected):
+        return True
+    cookie_value = (request.cookies.get(ADMIN_COOKIE_NAME) or '').strip()
+    if cookie_value and secrets.compare_digest(cookie_value, _admin_session_value()):
+        return True
+    return False
+
+
+def _require_admin_access(request: Request) -> None:
+    if not _is_admin_authenticated(request):
+        raise HTTPException(status_code=401, detail='admin login required')
+
+
+def _apply_admin_cookie(response: Response) -> None:
+    response.set_cookie(
+        key=ADMIN_COOKIE_NAME,
+        value=_admin_session_value(),
+        max_age=ADMIN_COOKIE_MAX_AGE,
+        httponly=True,
+        samesite='lax',
+    )
+
+
+def _clear_admin_cookie(response: Response) -> None:
+    response.delete_cookie(key=ADMIN_COOKIE_NAME, httponly=True, samesite='lax')
 
 
 @app.get('/', include_in_schema=False)
@@ -128,10 +172,40 @@ def home(request: Request):
 
 
 @app.get('/admin/analytics', include_in_schema=False)
-def admin_analytics_page():
+def admin_analytics_page(request: Request):
+    if not _is_admin_authenticated(request):
+        redirect_to = f'/?admin_login=1&next={quote("/admin/analytics", safe="/")}'
+        return RedirectResponse(url=redirect_to, status_code=307)
     if ADMIN_ANALYTICS_INDEX.exists():
         return FileResponse(ADMIN_ANALYTICS_INDEX)
     raise HTTPException(status_code=404, detail='admin analytics page not found')
+
+
+@app.post('/api/admin/login')
+def admin_login(payload: AdminLoginRequest):
+    username = (payload.username or '').strip()
+    password = payload.password or ''
+    if not (
+        secrets.compare_digest(username, _admin_username())
+        and secrets.compare_digest(password, _admin_password())
+    ):
+        raise HTTPException(status_code=401, detail='invalid admin credentials')
+    response = Response(
+        content=json_bytes({'ok': True, 'username': username}),
+        media_type='application/json; charset=utf-8',
+    )
+    _apply_admin_cookie(response)
+    return response
+
+
+@app.post('/api/admin/logout')
+def admin_logout():
+    response = Response(
+        content=json_bytes({'ok': True}),
+        media_type='application/json; charset=utf-8',
+    )
+    _clear_admin_cookie(response)
+    return response
 
 
 @app.get('/api/health')

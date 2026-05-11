@@ -305,6 +305,7 @@
           <div class="hero-actions">
             <a class="ghost-link" href="/">返回搜索页</a>
             <a class="ghost-link" id="open-search-export" href="#">导出搜索明细</a>
+            <button type="button" class="ghost-link" id="logout-btn">退出登录</button>
           </div>
         </div>
       </div>
@@ -686,6 +687,13 @@
     document.getElementById('open-search-export').addEventListener('click', (event) => {
       event.preventDefault();
       window.location.href = downloadLink('searches', 'csv');
+    });
+
+    document.getElementById('logout-btn').addEventListener('click', async () => {
+      try {
+        await fetch(`${API}/admin/logout`, { method: 'POST' });
+      } catch {}
+      window.location.href = '/';
     });
 
     ['date-from', 'date-to', 'keyword', 'page-size'].forEach((id) => {

@@ -317,6 +317,63 @@
       display: none;
     }
     .toast.show { display: block; }
+    #admin-login-overlay {
+      display: none;
+      position: fixed;
+      inset: 0;
+      background: rgba(23, 32, 51, .46);
+      z-index: 70;
+      align-items: center;
+      justify-content: center;
+      padding: 16px;
+    }
+    #admin-login-overlay.open { display: flex; }
+    .admin-login-card {
+      width: min(420px, 100%);
+      background: #fff;
+      border-radius: 16px;
+      box-shadow: 0 24px 60px rgba(0, 0, 0, .2);
+      border: 1px solid var(--line);
+      overflow: hidden;
+    }
+    .admin-login-head {
+      padding: 18px 18px 10px;
+    }
+    .admin-login-title {
+      margin: 0;
+      font-size: 20px;
+      font-weight: 760;
+      color: var(--link-blue);
+    }
+    .admin-login-sub {
+      margin: 8px 0 0;
+      color: var(--muted);
+      font-size: 13px;
+      line-height: 1.55;
+    }
+    .admin-login-body {
+      display: grid;
+      gap: 10px;
+      padding: 0 18px 18px;
+    }
+    .admin-login-body input {
+      width: 100%;
+    }
+    .admin-login-msg {
+      min-height: 20px;
+      color: #b44343;
+      font-size: 13px;
+      line-height: 1.45;
+    }
+    .admin-login-actions {
+      display: flex;
+      gap: 10px;
+      padding: 0 18px 18px;
+    }
+    .admin-login-actions button {
+      flex: 1;
+      width: auto;
+    }
     .empty {
       margin-top: 16px;
       color: var(--muted);
@@ -409,6 +466,9 @@
       .card-actions { justify-content: stretch; }
       .card-actions .link { width: 100%; margin-right: 0; }
       .action-btn { flex: 1 1 140px; }
+      .admin-login-actions {
+        flex-direction: column;
+      }
       .filters { align-items: stretch; }
       .filter-group { width: 100%; }
       .filter-group select { flex: 1; }
@@ -450,7 +510,7 @@
 <body>
   <div class="topbar">
     <div class="topbar-tools">
-      <a class="feedback-btn" href="/admin/analytics">统计后台</a>
+      <a class="feedback-btn" href="/admin/analytics" id="admin-entry-btn">统计后台</a>
       <a class="feedback-btn" href="mailto:ykxb@gzzoc.com?subject=%E8%AE%BA%E6%96%87%E6%90%9C%E7%B4%A2%E5%B7%A5%E5%85%B7%E9%97%AE%E9%A2%98%E5%8F%8D%E9%A6%88">反馈邮箱：ykxb@gzzoc.com</a>
     </div>
     <div class="logo-group">
@@ -529,15 +589,35 @@
     </div>
   </div>
   <div id="toast" class="toast"></div>
+  <div id="admin-login-overlay" onclick="if(event.target===this) closeAdminLogin()">
+    <div class="admin-login-card" onclick="event.stopPropagation()">
+      <div class="admin-login-head">
+        <h2 class="admin-login-title">管理员登录</h2>
+        <p class="admin-login-sub">登录成功后才能进入统计后台。建议上线后把默认管理员账号密码改成你自己的环境变量配置。</p>
+      </div>
+      <div class="admin-login-body">
+        <input id="admin-login-username" placeholder="管理员账号" autocomplete="username" />
+        <input id="admin-login-password" type="password" placeholder="管理员密码" autocomplete="current-password" />
+        <div id="admin-login-msg" class="admin-login-msg"></div>
+      </div>
+      <div class="admin-login-actions">
+        <button type="button" class="ghost" onclick="closeAdminLogin()">取消</button>
+        <button type="button" id="admin-login-submit" onclick="submitAdminLogin()">登录并进入统计后台</button>
+      </div>
+    </div>
+  </div>
 
   <script>
     const API = window.location.protocol === 'file:'
       ? 'http://127.0.0.1:0421/api'
       : `${window.location.origin}/api`;
+    const ADMIN_DEFAULT_NEXT = '/admin/analytics';
+    const HOME_QS = new URLSearchParams(window.location.search);
 
     let detailCache = null;
     let lastSearchData = null;
     let lastSearchContext = null;
+    let pendingAdminNext = ADMIN_DEFAULT_NEXT;
     let showMatchDebug = false;
 
     function esc(s) {
@@ -555,6 +635,60 @@
       t.classList.add('show');
       clearTimeout(toast._tid);
       toast._tid = setTimeout(() => t.classList.remove('show'), 2200);
+    }
+
+    function setAdminLoginMessage(msg) {
+      document.getElementById('admin-login-msg').textContent = msg || '';
+    }
+
+    function openAdminLogin(nextPath = ADMIN_DEFAULT_NEXT) {
+      pendingAdminNext = nextPath || ADMIN_DEFAULT_NEXT;
+      setAdminLoginMessage('');
+      document.getElementById('admin-login-overlay').classList.add('open');
+      setTimeout(() => {
+        const usernameInput = document.getElementById('admin-login-username');
+        if (usernameInput) usernameInput.focus();
+      }, 0);
+    }
+
+    function closeAdminLogin() {
+      document.getElementById('admin-login-overlay').classList.remove('open');
+      setAdminLoginMessage('');
+    }
+
+    async function submitAdminLogin() {
+      const submitBtn = document.getElementById('admin-login-submit');
+      const username = document.getElementById('admin-login-username').value.trim();
+      const password = document.getElementById('admin-login-password').value;
+      if (!username || !password) {
+        setAdminLoginMessage('请输入管理员账号和密码。');
+        return;
+      }
+      const oldText = submitBtn.textContent;
+      submitBtn.disabled = true;
+      submitBtn.textContent = '登录中...';
+      setAdminLoginMessage('');
+      try {
+        const response = await fetch(`${API}/admin/login`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ username, password }),
+        });
+        if (!response.ok) {
+          let detail = '管理员账号或密码不正确。';
+          try {
+            const payload = await response.json();
+            if (payload && payload.detail) detail = payload.detail;
+          } catch {}
+          throw new Error(detail);
+        }
+        window.location.href = pendingAdminNext || ADMIN_DEFAULT_NEXT;
+      } catch (err) {
+        setAdminLoginMessage(err.message || '登录失败，请稍后再试。');
+      } finally {
+        submitBtn.disabled = false;
+        submitBtn.textContent = oldText;
+      }
     }
 
     function useExample(text) {
@@ -831,6 +965,16 @@
     document.getElementById('q').addEventListener('keydown', (e) => {
       if (e.key === 'Enter') doSearch();
     });
+    document.getElementById('admin-entry-btn').addEventListener('click', (e) => {
+      e.preventDefault();
+      openAdminLogin(ADMIN_DEFAULT_NEXT);
+    });
+    document.getElementById('admin-login-username').addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') submitAdminLogin();
+    });
+    document.getElementById('admin-login-password').addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') submitAdminLogin();
+    });
     document.getElementById('sort').addEventListener('change', () => {
       if (document.getElementById('q').value.trim()) doSearch();
     });
@@ -852,8 +996,14 @@
       trackPaperClickByMeta(card.dataset.paperId, card.dataset.paperTitle || '');
     });
     document.addEventListener('keydown', (e) => {
-      if (e.key === 'Escape') closeModal();
+      if (e.key === 'Escape') {
+        closeModal();
+        closeAdminLogin();
+      }
     });
+    if (HOME_QS.get('admin_login') === '1') {
+      openAdminLogin(HOME_QS.get('next') || ADMIN_DEFAULT_NEXT);
+    }
   </script>
   <footer>
     © 中山大学中山眼科中心 | Eye Science | 版权所有
