@@ -21,6 +21,7 @@ engine = SearchEngine()
 analytics = AnalyticsStore(engine.db_backend, engine.db_path)
 FRONTEND_INDEX = Path(__file__).resolve().parents[2] / 'frontend' / 'index.html'
 FRONTEND_DIR = FRONTEND_INDEX.parent
+ADMIN_ANALYTICS_INDEX = FRONTEND_DIR / 'admin-analytics.html'
 VISITOR_COOKIE_NAME = 'pst_vid'
 VISITOR_COOKIE_MAX_AGE = 60 * 60 * 24 * 365
 
@@ -126,6 +127,13 @@ def home(request: Request):
     raise HTTPException(status_code=404, detail='frontend not found')
 
 
+@app.get('/admin/analytics', include_in_schema=False)
+def admin_analytics_page():
+    if ADMIN_ANALYTICS_INDEX.exists():
+        return FileResponse(ADMIN_ANALYTICS_INDEX)
+    raise HTTPException(status_code=404, detail='admin analytics page not found')
+
+
 @app.get('/api/health')
 def health():
     payload = {
@@ -141,6 +149,7 @@ def health():
         'last_rerank_debug': engine.get_last_rerank_debug(),
         'last_author_debug': engine.get_last_author_debug(),
         'analytics_enabled': analytics.enabled,
+        'analytics_backend': analytics.backend_label,
     }
     payload.update(engine.embedding_status())
     return payload

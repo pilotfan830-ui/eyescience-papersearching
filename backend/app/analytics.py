@@ -2,65 +2,69 @@ from __future__ import annotations
 
 import csv
 import json
-import sqlite3
-import threading
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, time, timedelta
 from io import StringIO
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from pathlib import Path
+from typing import Any, Dict, List, Optional
+
+from sqlalchemy import (
+    Column,
+    DateTime,
+    Float,
+    Index,
+    Integer,
+    MetaData,
+    String,
+    Table,
+    Text,
+    and_,
+    case,
+    create_engine,
+    distinct,
+    func,
+    insert,
+    or_,
+    select,
+)
+from sqlalchemy.engine import Engine
 
 
 class AnalyticsStore:
     def __init__(self, db_backend: str, db_path: str) -> None:
         self.db_backend = db_backend
         self.db_path = db_path
-        self.enabled = db_backend == 'sqlite' and '://' not in db_path
-        self._schema_lock = threading.Lock()
-        if self.enabled:
-            self.ensure_schema()
+        self.enabled = True
+        self._engine = self._build_engine(db_backend=db_backend, db_path=db_path)
+        self._metadata = MetaData()
+        self.events = Table(
+            'analytics_events',
+            self._metadata,
+            Column('id', Integer, primary_key=True, autoincrement=True),
+            Column('event_type', String(32), nullable=False),
+            Column('occurred_at', DateTime, nullable=False, server_default=func.current_timestamp()),
+            Column('visitor_id', String(128), nullable=False),
+            Column('ip_hash', String(128)),
+            Column('user_agent', Text),
+            Column('referer', Text),
+            Column('path', String(255)),
+            Column('query_raw', Text),
+            Column('query_normalized', String(512)),
+            Column('year_from', Integer),
+            Column('year_to', Integer),
+            Column('sort', String(32)),
+            Column('result_count', Integer),
+            Column('latency_ms', Float),
+            Column('status_code', Integer),
+            Index('idx_analytics_events_occurred_at', 'occurred_at'),
+            Index('idx_analytics_events_type_time', 'event_type', 'occurred_at'),
+            Index('idx_analytics_events_visitor', 'visitor_id'),
+            Index('idx_analytics_events_query', 'query_normalized'),
+        )
+        self.backend_label = self._engine.dialect.name
+        self.ensure_schema()
 
     def ensure_schema(self) -> None:
-        if not self.enabled:
-            return
-        with self._schema_lock:
-            conn = self._connect()
-            try:
-                conn.executescript(
-                    '''
-                    CREATE TABLE IF NOT EXISTS analytics_events (
-                        id INTEGER PRIMARY KEY AUTOINCREMENT,
-                        event_type TEXT NOT NULL,
-                        occurred_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-                        visitor_id TEXT NOT NULL,
-                        ip_hash TEXT,
-                        user_agent TEXT,
-                        referer TEXT,
-                        path TEXT,
-                        query_raw TEXT,
-                        query_normalized TEXT,
-                        year_from INTEGER,
-                        year_to INTEGER,
-                        sort TEXT,
-                        result_count INTEGER,
-                        latency_ms REAL,
-                        status_code INTEGER
-                    );
-
-                    CREATE INDEX IF NOT EXISTS idx_analytics_events_occurred_at
-                    ON analytics_events(occurred_at);
-
-                    CREATE INDEX IF NOT EXISTS idx_analytics_events_type_time
-                    ON analytics_events(event_type, occurred_at);
-
-                    CREATE INDEX IF NOT EXISTS idx_analytics_events_visitor
-                    ON analytics_events(visitor_id);
-
-                    CREATE INDEX IF NOT EXISTS idx_analytics_events_query
-                    ON analytics_events(query_normalized);
-                    '''
-                )
-                conn.commit()
-            finally:
-                conn.close()
+        self._metadata.create_all(self._engine, checkfirst=True)
 
     def record_page_view(
         self,
@@ -132,7 +136,6 @@ class AnalyticsStore:
         page_size: int,
         keyword_limit: int,
     ) -> Dict[str, Any]:
-        self._ensure_available()
         safe_page = max(int(page or 1), 1)
         safe_page_size = min(max(int(page_size or 20), 1), 200)
         safe_keyword_limit = min(max(int(keyword_limit or 20), 1), 100)
@@ -153,24 +156,25 @@ class AnalyticsStore:
         }
 
     def overview(self, *, date_from: Optional[date], date_to: Optional[date]) -> Dict[str, Any]:
-        self._ensure_available()
-        where_sql, params = self._event_filter_sql(date_from=date_from, date_to=date_to)
-        conn = self._connect()
-        try:
-            row = conn.execute(
-                f'''
-                SELECT
-                    SUM(CASE WHEN event_type = 'page_view' THEN 1 ELSE 0 END) AS page_views,
-                    COUNT(DISTINCT CASE WHEN event_type = 'page_view' THEN visitor_id END) AS unique_visitors,
-                    SUM(CASE WHEN event_type = 'search' THEN 1 ELSE 0 END) AS searches,
-                    COUNT(DISTINCT CASE WHEN event_type = 'search' THEN visitor_id END) AS search_visitors
-                FROM analytics_events
-                {where_sql}
-                ''',
-                params,
-            ).fetchone()
-        finally:
-            conn.close()
+        filters = self._event_filters(date_from=date_from, date_to=date_to)
+        stmt = select(
+            func.sum(case((self.events.c.event_type == 'page_view', 1), else_=0)).label('page_views'),
+            func.count(
+                distinct(
+                    case((self.events.c.event_type == 'page_view', self.events.c.visitor_id), else_=None)
+                )
+            ).label('unique_visitors'),
+            func.sum(case((self.events.c.event_type == 'search', 1), else_=0)).label('searches'),
+            func.count(
+                distinct(
+                    case((self.events.c.event_type == 'search', self.events.c.visitor_id), else_=None)
+                )
+            ).label('search_visitors'),
+        ).select_from(self.events)
+        if filters:
+            stmt = stmt.where(and_(*filters))
+        with self._engine.begin() as conn:
+            row = conn.execute(stmt).mappings().one()
         return {
             'date_from': date_from.isoformat() if date_from else None,
             'date_to': date_to.isoformat() if date_to else None,
@@ -187,34 +191,29 @@ class AnalyticsStore:
         date_to: Optional[date],
         limit: int,
     ) -> List[Dict[str, Any]]:
-        self._ensure_available()
-        where_sql, params = self._search_filter_sql(
-            date_from=date_from,
-            date_to=date_to,
-            keyword=None,
-            require_nonempty_query=True,
+        stmt = (
+            select(
+                self.events.c.query_normalized.label('keyword'),
+                func.count().label('searches'),
+                func.count(distinct(self.events.c.visitor_id)).label('visitors'),
+                func.sum(
+                    case((func.coalesce(self.events.c.result_count, 0) == 0, 1), else_=0)
+                ).label('zero_result_searches'),
+                func.max(self.events.c.occurred_at).label('last_searched_at'),
+            )
+            .where(and_(*self._search_filters(
+                date_from=date_from,
+                date_to=date_to,
+                keyword=None,
+                require_nonempty_query=True,
+            )))
+            .group_by(self.events.c.query_normalized)
+            .order_by(func.count().desc(), func.max(self.events.c.occurred_at).desc())
+            .limit(limit)
         )
-        conn = self._connect()
-        try:
-            rows = conn.execute(
-                f'''
-                SELECT
-                    query_normalized AS keyword,
-                    COUNT(*) AS searches,
-                    COUNT(DISTINCT visitor_id) AS visitors,
-                    SUM(CASE WHEN COALESCE(result_count, 0) = 0 THEN 1 ELSE 0 END) AS zero_result_searches,
-                    MAX(occurred_at) AS last_searched_at
-                FROM analytics_events
-                {where_sql}
-                GROUP BY query_normalized
-                ORDER BY searches DESC, last_searched_at DESC
-                LIMIT ?
-                ''',
-                [*params, limit],
-            ).fetchall()
-        finally:
-            conn.close()
-        return [dict(row) for row in rows]
+        with self._engine.begin() as conn:
+            rows = conn.execute(stmt).mappings().all()
+        return [self._normalize_record(row) for row in rows]
 
     def recent_searches(
         self,
@@ -225,55 +224,44 @@ class AnalyticsStore:
         page: int,
         page_size: int,
     ) -> Dict[str, Any]:
-        self._ensure_available()
         safe_page = max(int(page or 1), 1)
         safe_page_size = min(max(int(page_size or 20), 1), 200)
         offset = (safe_page - 1) * safe_page_size
-        where_sql, params = self._search_filter_sql(
+        filters = self._search_filters(
             date_from=date_from,
             date_to=date_to,
             keyword=keyword,
             require_nonempty_query=False,
         )
-        conn = self._connect()
-        try:
-            total_row = conn.execute(
-                f'''
-                SELECT COUNT(*) AS total
-                FROM analytics_events
-                {where_sql}
-                ''',
-                params,
-            ).fetchone()
-            rows = conn.execute(
-                f'''
-                SELECT
-                    id,
-                    occurred_at,
-                    visitor_id,
-                    query_raw,
-                    query_normalized,
-                    year_from,
-                    year_to,
-                    sort,
-                    result_count,
-                    latency_ms,
-                    path
-                FROM analytics_events
-                {where_sql}
-                ORDER BY occurred_at DESC, id DESC
-                LIMIT ? OFFSET ?
-                ''',
-                [*params, safe_page_size, offset],
-            ).fetchall()
-        finally:
-            conn.close()
+        total_stmt = select(func.count()).select_from(self.events).where(and_(*filters))
+        rows_stmt = (
+            select(
+                self.events.c.id,
+                self.events.c.occurred_at,
+                self.events.c.visitor_id,
+                self.events.c.query_raw,
+                self.events.c.query_normalized,
+                self.events.c.year_from,
+                self.events.c.year_to,
+                self.events.c.sort,
+                self.events.c.result_count,
+                self.events.c.latency_ms,
+                self.events.c.path,
+            )
+            .where(and_(*filters))
+            .order_by(self.events.c.occurred_at.desc(), self.events.c.id.desc())
+            .limit(safe_page_size)
+            .offset(offset)
+        )
+        with self._engine.begin() as conn:
+            total = int(conn.execute(total_stmt).scalar() or 0)
+            rows = conn.execute(rows_stmt).mappings().all()
         return {
             'keyword': keyword or None,
             'page': safe_page,
             'page_size': safe_page_size,
-            'total': int(total_row['total'] or 0),
-            'items': [dict(row) for row in rows],
+            'total': total,
+            'items': [self._normalize_record(row) for row in rows],
         }
 
     def export_rows(
@@ -284,7 +272,6 @@ class AnalyticsStore:
         date_to: Optional[date],
         keyword: Optional[str],
     ) -> List[Dict[str, Any]]:
-        self._ensure_available()
         if dataset == 'searches':
             return self._search_export_rows(date_from=date_from, date_to=date_to, keyword=keyword)
         if dataset == 'keywords':
@@ -337,22 +324,8 @@ class AnalyticsStore:
             writer.writeheader()
             writer.writerows(rows)
         else:
-            default_headers = {
-                'searches': [
-                    'occurred_at', 'visitor_id', 'query_raw', 'query_normalized',
-                    'year_from', 'year_to', 'sort', 'result_count', 'latency_ms',
-                    'path', 'ip_hash', 'user_agent',
-                ],
-                'keywords': [
-                    'keyword', 'searches', 'visitors', 'zero_result_searches', 'last_searched_at',
-                ],
-                'daily': [
-                    'date', 'page_views', 'unique_visitors', 'searches',
-                    'search_visitors', 'zero_result_searches',
-                ],
-            }
             writer = csv.writer(buffer)
-            writer.writerow(default_headers.get(dataset, []))
+            writer.writerow(self._default_headers(dataset))
         return ('\ufeff' + buffer.getvalue()).encode('utf-8')
 
     def _search_export_rows(
@@ -362,38 +335,33 @@ class AnalyticsStore:
         date_to: Optional[date],
         keyword: Optional[str],
     ) -> List[Dict[str, Any]]:
-        where_sql, params = self._search_filter_sql(
+        filters = self._search_filters(
             date_from=date_from,
             date_to=date_to,
             keyword=keyword,
             require_nonempty_query=False,
         )
-        conn = self._connect()
-        try:
-            rows = conn.execute(
-                f'''
-                SELECT
-                    occurred_at,
-                    visitor_id,
-                    query_raw,
-                    query_normalized,
-                    year_from,
-                    year_to,
-                    sort,
-                    result_count,
-                    latency_ms,
-                    path,
-                    ip_hash,
-                    user_agent
-                FROM analytics_events
-                {where_sql}
-                ORDER BY occurred_at DESC, id DESC
-                ''',
-                params,
-            ).fetchall()
-        finally:
-            conn.close()
-        return [dict(row) for row in rows]
+        stmt = (
+            select(
+                self.events.c.occurred_at,
+                self.events.c.visitor_id,
+                self.events.c.query_raw,
+                self.events.c.query_normalized,
+                self.events.c.year_from,
+                self.events.c.year_to,
+                self.events.c.sort,
+                self.events.c.result_count,
+                self.events.c.latency_ms,
+                self.events.c.path,
+                self.events.c.ip_hash,
+                self.events.c.user_agent,
+            )
+            .where(and_(*filters))
+            .order_by(self.events.c.occurred_at.desc(), self.events.c.id.desc())
+        )
+        with self._engine.begin() as conn:
+            rows = conn.execute(stmt).mappings().all()
+        return [self._normalize_record(row) for row in rows]
 
     def _keyword_export_rows(
         self,
@@ -409,123 +377,126 @@ class AnalyticsStore:
         date_from: Optional[date],
         date_to: Optional[date],
     ) -> List[Dict[str, Any]]:
-        where_sql, params = self._event_filter_sql(date_from=date_from, date_to=date_to)
-        conn = self._connect()
-        try:
-            rows = conn.execute(
-                f'''
-                SELECT
-                    substr(occurred_at, 1, 10) AS date,
-                    SUM(CASE WHEN event_type = 'page_view' THEN 1 ELSE 0 END) AS page_views,
-                    COUNT(DISTINCT CASE WHEN event_type = 'page_view' THEN visitor_id END) AS unique_visitors,
-                    SUM(CASE WHEN event_type = 'search' THEN 1 ELSE 0 END) AS searches,
-                    COUNT(DISTINCT CASE WHEN event_type = 'search' THEN visitor_id END) AS search_visitors,
-                    SUM(CASE WHEN event_type = 'search' AND COALESCE(result_count, 0) = 0 THEN 1 ELSE 0 END) AS zero_result_searches
-                FROM analytics_events
-                {where_sql}
-                GROUP BY substr(occurred_at, 1, 10)
-                ORDER BY date DESC
-                ''',
-                params,
-            ).fetchall()
-        finally:
-            conn.close()
-        return [dict(row) for row in rows]
+        event_date = func.date(self.events.c.occurred_at)
+        filters = self._event_filters(date_from=date_from, date_to=date_to)
+        stmt = (
+            select(
+                event_date.label('date'),
+                func.sum(case((self.events.c.event_type == 'page_view', 1), else_=0)).label('page_views'),
+                func.count(
+                    distinct(
+                        case((self.events.c.event_type == 'page_view', self.events.c.visitor_id), else_=None)
+                    )
+                ).label('unique_visitors'),
+                func.sum(case((self.events.c.event_type == 'search', 1), else_=0)).label('searches'),
+                func.count(
+                    distinct(
+                        case((self.events.c.event_type == 'search', self.events.c.visitor_id), else_=None)
+                    )
+                ).label('search_visitors'),
+                func.sum(
+                    case((
+                        and_(
+                            self.events.c.event_type == 'search',
+                            func.coalesce(self.events.c.result_count, 0) == 0,
+                        ),
+                        1,
+                    ), else_=0)
+                ).label('zero_result_searches'),
+            )
+            .select_from(self.events)
+            .group_by(event_date)
+            .order_by(event_date.desc())
+        )
+        if filters:
+            stmt = stmt.where(and_(*filters))
+        with self._engine.begin() as conn:
+            rows = conn.execute(stmt).mappings().all()
+        return [self._normalize_record(row) for row in rows]
 
     def _insert_event(self, **payload: Any) -> None:
-        if not self.enabled:
-            return
-        self.ensure_schema()
-        conn = self._connect()
-        try:
-            conn.execute(
-                '''
-                INSERT INTO analytics_events(
-                    event_type, visitor_id, ip_hash, user_agent, referer, path,
-                    query_raw, query_normalized, year_from, year_to, sort,
-                    result_count, latency_ms, status_code
-                )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ''',
-                (
-                    payload.get('event_type'),
-                    payload.get('visitor_id'),
-                    payload.get('ip_hash'),
-                    payload.get('user_agent'),
-                    payload.get('referer'),
-                    payload.get('path'),
-                    payload.get('query_raw'),
-                    payload.get('query_normalized'),
-                    payload.get('year_from'),
-                    payload.get('year_to'),
-                    payload.get('sort'),
-                    payload.get('result_count'),
-                    payload.get('latency_ms'),
-                    payload.get('status_code'),
-                ),
-            )
-            conn.commit()
-        finally:
-            conn.close()
+        stmt = insert(self.events).values(**payload)
+        with self._engine.begin() as conn:
+            conn.execute(stmt)
 
-    def _event_filter_sql(
-        self,
-        *,
-        date_from: Optional[date],
-        date_to: Optional[date],
-    ) -> Tuple[str, List[Any]]:
-        clauses: List[str] = []
-        params: List[Any] = []
+    def _event_filters(self, *, date_from: Optional[date], date_to: Optional[date]) -> List[Any]:
+        filters: List[Any] = []
         if date_from:
-            clauses.append('occurred_at >= ?')
-            params.append(f'{date_from.isoformat()} 00:00:00')
+            filters.append(self.events.c.occurred_at >= self._start_dt(date_from))
         if date_to:
-            end_exclusive = date_to + timedelta(days=1)
-            clauses.append('occurred_at < ?')
-            params.append(f'{end_exclusive.isoformat()} 00:00:00')
-        if not clauses:
-            return '', params
-        return 'WHERE ' + ' AND '.join(clauses), params
+            filters.append(self.events.c.occurred_at < self._end_exclusive_dt(date_to))
+        return filters
 
-    def _search_filter_sql(
+    def _search_filters(
         self,
         *,
         date_from: Optional[date],
         date_to: Optional[date],
         keyword: Optional[str],
         require_nonempty_query: bool,
-    ) -> Tuple[str, List[Any]]:
-        clauses = ["event_type = 'search'"]
-        params: List[Any] = []
-        if date_from:
-            clauses.append('occurred_at >= ?')
-            params.append(f'{date_from.isoformat()} 00:00:00')
-        if date_to:
-            end_exclusive = date_to + timedelta(days=1)
-            clauses.append('occurred_at < ?')
-            params.append(f'{end_exclusive.isoformat()} 00:00:00')
+    ) -> List[Any]:
+        filters = [self.events.c.event_type == 'search']
+        filters.extend(self._event_filters(date_from=date_from, date_to=date_to))
         if require_nonempty_query:
-            clauses.append("COALESCE(query_normalized, '') <> ''")
+            filters.append(func.coalesce(self.events.c.query_normalized, '') != '')
         normalized_keyword = self._normalize_query(keyword or '')
         if normalized_keyword:
-            clauses.append('(query_normalized LIKE ? OR query_raw LIKE ?)')
             pattern = f'%{normalized_keyword}%'
-            params.extend([pattern, pattern])
-        return 'WHERE ' + ' AND '.join(clauses), params
-
-    def _connect(self) -> sqlite3.Connection:
-        conn = sqlite3.connect(self.db_path)
-        conn.row_factory = sqlite3.Row
-        return conn
-
-    def _ensure_available(self) -> None:
-        if not self.enabled:
-            raise RuntimeError(
-                'analytics is available only when the paper database uses a local sqlite file'
+            filters.append(
+                or_(
+                    self.events.c.query_normalized.like(pattern),
+                    func.lower(func.coalesce(self.events.c.query_raw, '')).like(pattern),
+                )
             )
+        return filters
+
+    def _build_engine(self, *, db_backend: str, db_path: str) -> Engine:
+        if db_backend == 'sqlite' and '://' not in db_path:
+            path = Path(db_path).expanduser().resolve()
+            return create_engine(
+                f'sqlite:///{path.as_posix()}',
+                future=True,
+                pool_pre_ping=True,
+                connect_args={'check_same_thread': False},
+            )
+        return create_engine(db_path, future=True, pool_pre_ping=True)
+
+    def _default_headers(self, dataset: str) -> List[str]:
+        default_headers = {
+            'searches': [
+                'occurred_at', 'visitor_id', 'query_raw', 'query_normalized',
+                'year_from', 'year_to', 'sort', 'result_count', 'latency_ms',
+                'path', 'ip_hash', 'user_agent',
+            ],
+            'keywords': [
+                'keyword', 'searches', 'visitors', 'zero_result_searches', 'last_searched_at',
+            ],
+            'daily': [
+                'date', 'page_views', 'unique_visitors', 'searches',
+                'search_visitors', 'zero_result_searches',
+            ],
+        }
+        return default_headers.get(dataset, [])
+
+    def _start_dt(self, value: date) -> datetime:
+        return datetime.combine(value, time.min)
+
+    def _end_exclusive_dt(self, value: date) -> datetime:
+        return datetime.combine(value + timedelta(days=1), time.min)
 
     def _normalize_query(self, text: str) -> str:
         return ' '.join(str(text or '').strip().lower().split())
+
+    def _normalize_record(self, record: Dict[str, Any]) -> Dict[str, Any]:
+        normalized: Dict[str, Any] = {}
+        for key, value in dict(record).items():
+            if isinstance(value, datetime):
+                normalized[key] = value.isoformat(sep=' ', timespec='seconds')
+            elif isinstance(value, date):
+                normalized[key] = value.isoformat()
+            else:
+                normalized[key] = value
+        return normalized
 
 
 def json_bytes(payload: Dict[str, Any]) -> bytes:
