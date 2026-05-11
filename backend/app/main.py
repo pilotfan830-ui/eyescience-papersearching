@@ -254,7 +254,7 @@ def admin_analytics(
 @app.get('/api/admin/analytics/export')
 def admin_analytics_export(
     request: Request,
-    dataset: str = Query('searches', pattern='^(searches|keywords|daily|clicks)$'),
+    dataset: str = Query('searches', pattern='^(searches|keywords|daily|clicks|paper_click_ranking)$'),
     format: str = Query('csv', pattern='^(csv|json)$'),
     date_from: Optional[date] = None,
     date_to: Optional[date] = None,
