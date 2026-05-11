@@ -1,19 +1,28 @@
+import hashlib
+import os
+import secrets
+import uuid
+from datetime import date
 from pathlib import Path
 from typing import Optional
 
 import uvicorn
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, PlainTextResponse, Response
 from fastapi.staticfiles import StaticFiles
 
+from .analytics import AnalyticsStore, json_bytes
 from .schemas import PaperDetail, SearchResponse
 from .search_engine import SearchEngine
 
 app = FastAPI(title='Paper Search API', version='0.1.0')
 engine = SearchEngine()
+analytics = AnalyticsStore(engine.db_backend, engine.db_path)
 FRONTEND_INDEX = Path(__file__).resolve().parents[2] / 'frontend' / 'index.html'
 FRONTEND_DIR = FRONTEND_INDEX.parent
+VISITOR_COOKIE_NAME = 'pst_vid'
+VISITOR_COOKIE_MAX_AGE = 60 * 60 * 24 * 365
 
 if FRONTEND_DIR.exists():
     app.mount('/static', StaticFiles(directory=FRONTEND_DIR), name='static')
@@ -41,10 +50,79 @@ def _clean_journal_name(journal: str | None) -> str:
     return raw
 
 
+def _client_ip(request: Request) -> str:
+    forwarded = request.headers.get('x-forwarded-for', '')
+    if forwarded.strip():
+        return forwarded.split(',')[0].strip()
+    real_ip = request.headers.get('x-real-ip', '').strip()
+    if real_ip:
+        return real_ip
+    if request.client and request.client.host:
+        return request.client.host
+    return ''
+
+
+def _hash_text(value: str) -> str:
+    return hashlib.sha256(value.encode('utf-8')).hexdigest()
+
+
+def _ensure_visitor_id(request: Request, response: Response) -> str:
+    raw_visitor_id = (request.cookies.get(VISITOR_COOKIE_NAME) or '').strip()
+    if not raw_visitor_id:
+        raw_visitor_id = uuid.uuid4().hex
+        response.set_cookie(
+            key=VISITOR_COOKIE_NAME,
+            value=raw_visitor_id,
+            max_age=VISITOR_COOKIE_MAX_AGE,
+            httponly=True,
+            samesite='lax',
+        )
+    return _hash_text(raw_visitor_id)
+
+
+def _request_ip_hash(request: Request) -> Optional[str]:
+    ip = _client_ip(request)
+    return _hash_text(ip) if ip else None
+
+
+def _trim_header(value: Optional[str], limit: int = 512) -> Optional[str]:
+    text = (value or '').strip()
+    if not text:
+        return None
+    return text[:limit]
+
+
+def _require_admin_access(request: Request) -> None:
+    expected = (
+        os.getenv('PAPER_SEARCH_ADMIN_TOKEN')
+        or os.getenv('ADMIN_TOKEN')
+        or ''
+    ).strip()
+    if not expected:
+        return
+    provided = (
+        request.headers.get('x-admin-token')
+        or request.query_params.get('admin_token')
+        or ''
+    ).strip()
+    if not provided or not secrets.compare_digest(provided, expected):
+        raise HTTPException(status_code=401, detail='admin token required')
+
+
 @app.get('/', include_in_schema=False)
-def home():
+def home(request: Request):
     if FRONTEND_INDEX.exists():
-        return FileResponse(FRONTEND_INDEX)
+        response = FileResponse(FRONTEND_INDEX)
+        visitor_id = _ensure_visitor_id(request, response)
+        analytics.record_page_view(
+            visitor_id=visitor_id,
+            ip_hash=_request_ip_hash(request),
+            user_agent=_trim_header(request.headers.get('user-agent')),
+            referer=_trim_header(request.headers.get('referer')),
+            path=request.url.path,
+            status_code=200,
+        )
+        return response
     raise HTTPException(status_code=404, detail='frontend not found')
 
 
@@ -62,6 +140,7 @@ def health():
         'last_rewrite_debug': engine.get_last_rewrite_debug(),
         'last_rerank_debug': engine.get_last_rerank_debug(),
         'last_author_debug': engine.get_last_author_debug(),
+        'analytics_enabled': analytics.enabled,
     }
     payload.update(engine.embedding_status())
     return payload
@@ -69,12 +148,15 @@ def health():
 
 @app.get('/api/search', response_model=SearchResponse)
 def search(
+    request: Request,
+    response: Response,
     q: str = Query(..., min_length=1),
     limit: int = 20,
     year_from: Optional[int] = None,
     year_to: Optional[int] = None,
     sort: str = Query('best_match', pattern='^(best_match|most_recent)$'),
 ):
+    visitor_id = _ensure_visitor_id(request, response)
     payload = engine.search_papers(
         q,
         topk=limit,
@@ -84,6 +166,23 @@ def search(
         include_timing=True,
     )
     items = payload['results']
+    latency_ms = None
+    if payload.get('timing'):
+        latency_ms = payload['timing'].get('total_ms')
+    analytics.record_search(
+        visitor_id=visitor_id,
+        ip_hash=_request_ip_hash(request),
+        user_agent=_trim_header(request.headers.get('user-agent')),
+        referer=_trim_header(request.headers.get('referer')),
+        path=request.url.path,
+        query_raw=q,
+        year_from=year_from,
+        year_to=year_to,
+        sort=sort,
+        result_count=len(items),
+        latency_ms=float(latency_ms) if latency_ms is not None else None,
+        status_code=200,
+    )
     return SearchResponse(
         query=q,
         total=len(items),
@@ -91,6 +190,74 @@ def search(
         timing=payload.get('timing'),
         items=items,
     )
+
+
+@app.get('/api/admin/analytics')
+def admin_analytics(
+    request: Request,
+    date_from: Optional[date] = None,
+    date_to: Optional[date] = None,
+    keyword: Optional[str] = None,
+    page: int = 1,
+    page_size: int = 20,
+    keyword_limit: int = 20,
+):
+    _require_admin_access(request)
+    try:
+        return analytics.dashboard(
+            date_from=date_from,
+            date_to=date_to,
+            keyword=keyword,
+            page=page,
+            page_size=page_size,
+            keyword_limit=keyword_limit,
+        )
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+
+@app.get('/api/admin/analytics/export')
+def admin_analytics_export(
+    request: Request,
+    dataset: str = Query('searches', pattern='^(searches|keywords|daily)$'),
+    format: str = Query('csv', pattern='^(csv|json)$'),
+    date_from: Optional[date] = None,
+    date_to: Optional[date] = None,
+    keyword: Optional[str] = None,
+):
+    _require_admin_access(request)
+    try:
+        if format == 'json':
+            content = json_bytes(
+                analytics.export_json_payload(
+                    dataset=dataset,
+                    date_from=date_from,
+                    date_to=date_to,
+                    keyword=keyword,
+                )
+            )
+            filename = f'analytics_{dataset}_{date.today().isoformat()}.json'
+            return Response(
+                content=content,
+                media_type='application/json; charset=utf-8',
+                headers={'Content-Disposition': f'attachment; filename="{filename}"'},
+            )
+        content = analytics.export_csv_bytes(
+            dataset=dataset,
+            date_from=date_from,
+            date_to=date_to,
+            keyword=keyword,
+        )
+        filename = f'analytics_{dataset}_{date.today().isoformat()}.csv'
+        return Response(
+            content=content,
+            media_type='text/csv; charset=utf-8',
+            headers={'Content-Disposition': f'attachment; filename="{filename}"'},
+        )
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @app.get('/api/papers/{paper_id}', response_model=PaperDetail)
