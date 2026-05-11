@@ -22,6 +22,7 @@ class PaperBrief(BaseModel):
 
 
 class SearchResponse(BaseModel):
+    search_event_id: Optional[int] = None
     query: str
     total: int
     semantic_enabled: bool
@@ -39,3 +40,13 @@ class PaperDetail(BaseModel):
     citation: Optional[str] = None
     doi: Optional[str] = None
     url: Optional[str] = None
+
+
+class PaperClickRequest(BaseModel):
+    paper_id: int
+    paper_title: str
+    search_event_id: Optional[int] = None
+    query: Optional[str] = None
+    year_from: Optional[int] = None
+    year_to: Optional[int] = None
+    sort: Optional[str] = None

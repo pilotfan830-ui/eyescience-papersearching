@@ -537,6 +537,7 @@
 
     let detailCache = null;
     let lastSearchData = null;
+    let lastSearchContext = null;
     let showMatchDebug = false;
 
     function esc(s) {
@@ -652,6 +653,13 @@
       try {
         const data = await fetch(`${API}/search?${searchParams(q)}`).then(r => r.json());
         lastSearchData = data;
+        lastSearchContext = {
+          query: q,
+          searchEventId: data.search_event_id || null,
+          yearFrom: document.getElementById('year-from').value || null,
+          yearTo: document.getElementById('year-to').value || null,
+          sort: document.getElementById('sort').value || 'best_match',
+        };
         renderResults(data, q);
       } catch (err) {
         root.innerHTML = '<div class="empty">搜索失败，请确认后端服务正在运行。</div>';
@@ -716,6 +724,7 @@
     async function showDetail(id) {
       const d = await getPaperDetail(id);
       detailCache = d;
+      trackPaperClick(d);
       document.getElementById('modal-title').textContent = d.title || '论文详情';
       document.getElementById('modal-body').innerHTML = renderDetailBody(d);
       document.getElementById('modal-overlay').classList.add('open');
@@ -723,6 +732,23 @@
 
     async function getPaperDetail(id) {
       return fetch(`${API}/papers/${id}`).then(r => r.json());
+    }
+
+    function trackPaperClick(detail) {
+      if (!detail || !lastSearchContext || !lastSearchContext.searchEventId) return;
+      fetch(`${API}/analytics/paper-click`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          paper_id: detail.id,
+          paper_title: detail.title || '',
+          search_event_id: lastSearchContext.searchEventId,
+          query: lastSearchContext.query,
+          year_from: lastSearchContext.yearFrom ? Number(lastSearchContext.yearFrom) : null,
+          year_to: lastSearchContext.yearTo ? Number(lastSearchContext.yearTo) : null,
+          sort: lastSearchContext.sort || 'best_match',
+        }),
+      }).catch(() => {});
     }
 
     async function withLoading(btn, label, fn) {

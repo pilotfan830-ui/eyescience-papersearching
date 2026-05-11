@@ -22,9 +22,11 @@ from sqlalchemy import (
     create_engine,
     distinct,
     func,
+    inspect,
     insert,
     or_,
     select,
+    text,
 )
 from sqlalchemy.engine import Engine
 
@@ -55,16 +57,21 @@ class AnalyticsStore:
             Column('result_count', Integer),
             Column('latency_ms', Float),
             Column('status_code', Integer),
+            Column('paper_id', Integer),
+            Column('paper_title', Text),
+            Column('related_search_event_id', Integer),
             Index('idx_analytics_events_occurred_at', 'occurred_at'),
             Index('idx_analytics_events_type_time', 'event_type', 'occurred_at'),
             Index('idx_analytics_events_visitor', 'visitor_id'),
             Index('idx_analytics_events_query', 'query_normalized'),
+            Index('idx_analytics_events_related_search', 'related_search_event_id'),
         )
         self.backend_label = self._engine.dialect.name
         self.ensure_schema()
 
     def ensure_schema(self) -> None:
         self._metadata.create_all(self._engine, checkfirst=True)
+        self._ensure_missing_columns()
 
     def record_page_view(
         self,
@@ -108,8 +115,8 @@ class AnalyticsStore:
         result_count: int,
         latency_ms: Optional[float],
         status_code: int = 200,
-    ) -> None:
-        self._insert_event(
+    ) -> int:
+        return self._insert_event(
             event_type='search',
             visitor_id=visitor_id,
             ip_hash=ip_hash,
@@ -124,6 +131,43 @@ class AnalyticsStore:
             result_count=result_count,
             latency_ms=latency_ms,
             status_code=status_code,
+        )
+
+    def record_paper_click(
+        self,
+        *,
+        visitor_id: str,
+        ip_hash: Optional[str],
+        user_agent: Optional[str],
+        referer: Optional[str],
+        path: str,
+        paper_id: int,
+        paper_title: str,
+        related_search_event_id: Optional[int],
+        query_raw: Optional[str],
+        year_from: Optional[int],
+        year_to: Optional[int],
+        sort: Optional[str],
+        status_code: int = 200,
+    ) -> int:
+        return self._insert_event(
+            event_type='paper_click',
+            visitor_id=visitor_id,
+            ip_hash=ip_hash,
+            user_agent=user_agent,
+            referer=referer,
+            path=path,
+            query_raw=query_raw,
+            query_normalized=self._normalize_query(query_raw or ''),
+            year_from=year_from,
+            year_to=year_to,
+            sort=sort,
+            result_count=None,
+            latency_ms=None,
+            status_code=status_code,
+            paper_id=paper_id,
+            paper_title=paper_title,
+            related_search_event_id=related_search_event_id,
         )
 
     def dashboard(
@@ -153,6 +197,12 @@ class AnalyticsStore:
                 page=safe_page,
                 page_size=safe_page_size,
             ),
+            'recent_clicks': self.recent_clicks(
+                date_from=date_from,
+                date_to=date_to,
+                keyword=keyword,
+                limit=12,
+            ),
         }
 
     def overview(self, *, date_from: Optional[date], date_to: Optional[date]) -> Dict[str, Any]:
@@ -170,6 +220,7 @@ class AnalyticsStore:
                     case((self.events.c.event_type == 'search', self.events.c.visitor_id), else_=None)
                 )
             ).label('search_visitors'),
+            func.sum(case((self.events.c.event_type == 'paper_click', 1), else_=0)).label('paper_clicks'),
         ).select_from(self.events)
         if filters:
             stmt = stmt.where(and_(*filters))
@@ -182,6 +233,7 @@ class AnalyticsStore:
             'unique_visitors': int(row['unique_visitors'] or 0),
             'searches': int(row['searches'] or 0),
             'search_visitors': int(row['search_visitors'] or 0),
+            'paper_clicks': int(row['paper_clicks'] or 0),
         }
 
     def top_keywords(
@@ -264,6 +316,49 @@ class AnalyticsStore:
             'items': [self._normalize_record(row) for row in rows],
         }
 
+    def recent_clicks(
+        self,
+        *,
+        date_from: Optional[date],
+        date_to: Optional[date],
+        keyword: Optional[str],
+        limit: int,
+    ) -> List[Dict[str, Any]]:
+        click_events = self.events.alias('click_events')
+        search_events = self.events.alias('search_events')
+        safe_limit = min(max(int(limit or 12), 1), 100)
+        filters = self._click_filters(
+            click_events=click_events,
+            date_from=date_from,
+            date_to=date_to,
+            keyword=keyword,
+        )
+        stmt = (
+            select(
+                click_events.c.id,
+                click_events.c.occurred_at.label('clicked_at'),
+                click_events.c.visitor_id,
+                click_events.c.paper_id,
+                click_events.c.paper_title,
+                click_events.c.related_search_event_id,
+                click_events.c.query_raw,
+                click_events.c.query_normalized,
+                search_events.c.occurred_at.label('searched_at'),
+            )
+            .select_from(
+                click_events.outerjoin(
+                    search_events,
+                    search_events.c.id == click_events.c.related_search_event_id,
+                )
+            )
+            .where(and_(*filters))
+            .order_by(click_events.c.occurred_at.desc(), click_events.c.id.desc())
+            .limit(safe_limit)
+        )
+        with self._engine.begin() as conn:
+            rows = conn.execute(stmt).mappings().all()
+        return [self._normalize_record(row) for row in rows]
+
     def export_rows(
         self,
         *,
@@ -278,6 +373,8 @@ class AnalyticsStore:
             return self._keyword_export_rows(date_from=date_from, date_to=date_to)
         if dataset == 'daily':
             return self._daily_export_rows(date_from=date_from, date_to=date_to)
+        if dataset == 'clicks':
+            return self._click_export_rows(date_from=date_from, date_to=date_to, keyword=keyword)
         raise ValueError(f'unsupported dataset: {dataset}')
 
     def export_json_payload(
@@ -414,10 +511,60 @@ class AnalyticsStore:
             rows = conn.execute(stmt).mappings().all()
         return [self._normalize_record(row) for row in rows]
 
-    def _insert_event(self, **payload: Any) -> None:
+    def _click_export_rows(
+        self,
+        *,
+        date_from: Optional[date],
+        date_to: Optional[date],
+        keyword: Optional[str],
+    ) -> List[Dict[str, Any]]:
+        click_events = self.events.alias('click_events')
+        search_events = self.events.alias('search_events')
+        filters = self._click_filters(
+            click_events=click_events,
+            date_from=date_from,
+            date_to=date_to,
+            keyword=keyword,
+        )
+        stmt = (
+            select(
+                click_events.c.occurred_at.label('clicked_at'),
+                search_events.c.occurred_at.label('searched_at'),
+                click_events.c.visitor_id,
+                click_events.c.related_search_event_id,
+                click_events.c.query_raw,
+                click_events.c.query_normalized,
+                click_events.c.paper_id,
+                click_events.c.paper_title,
+                click_events.c.year_from,
+                click_events.c.year_to,
+                click_events.c.sort,
+                click_events.c.path,
+                click_events.c.ip_hash,
+                click_events.c.user_agent,
+            )
+            .select_from(
+                click_events.outerjoin(
+                    search_events,
+                    search_events.c.id == click_events.c.related_search_event_id,
+                )
+            )
+            .where(and_(*filters))
+            .order_by(click_events.c.occurred_at.desc(), click_events.c.id.desc())
+        )
+        with self._engine.begin() as conn:
+            rows = conn.execute(stmt).mappings().all()
+        return [self._normalize_record(row) for row in rows]
+
+    def _insert_event(self, **payload: Any) -> int:
         stmt = insert(self.events).values(**payload)
         with self._engine.begin() as conn:
-            conn.execute(stmt)
+            result = conn.execute(stmt)
+            inserted_id = getattr(result, 'inserted_primary_key', None)
+            if inserted_id and inserted_id[0] is not None:
+                return int(inserted_id[0])
+            lastrowid = getattr(result, 'lastrowid', None)
+            return int(lastrowid or 0)
 
     def _event_filters(self, *, date_from: Optional[date], date_to: Optional[date]) -> List[Any]:
         filters: List[Any] = []
@@ -450,6 +597,31 @@ class AnalyticsStore:
             )
         return filters
 
+    def _click_filters(
+        self,
+        *,
+        click_events,
+        date_from: Optional[date],
+        date_to: Optional[date],
+        keyword: Optional[str],
+    ) -> List[Any]:
+        filters = [click_events.c.event_type == 'paper_click']
+        if date_from:
+            filters.append(click_events.c.occurred_at >= self._start_dt(date_from))
+        if date_to:
+            filters.append(click_events.c.occurred_at < self._end_exclusive_dt(date_to))
+        normalized_keyword = self._normalize_query(keyword or '')
+        if normalized_keyword:
+            pattern = f'%{normalized_keyword}%'
+            filters.append(
+                or_(
+                    click_events.c.query_normalized.like(pattern),
+                    func.lower(func.coalesce(click_events.c.query_raw, '')).like(pattern),
+                    func.lower(func.coalesce(click_events.c.paper_title, '')).like(pattern),
+                )
+            )
+        return filters
+
     def _build_engine(self, *, db_backend: str, db_path: str) -> Engine:
         if db_backend == 'sqlite' and '://' not in db_path:
             path = Path(db_path).expanduser().resolve()
@@ -475,6 +647,11 @@ class AnalyticsStore:
                 'date', 'page_views', 'unique_visitors', 'searches',
                 'search_visitors', 'zero_result_searches',
             ],
+            'clicks': [
+                'clicked_at', 'searched_at', 'visitor_id', 'related_search_event_id',
+                'query_raw', 'query_normalized', 'paper_id', 'paper_title',
+                'year_from', 'year_to', 'sort', 'path', 'ip_hash', 'user_agent',
+            ],
         }
         return default_headers.get(dataset, [])
 
@@ -486,6 +663,29 @@ class AnalyticsStore:
 
     def _normalize_query(self, text: str) -> str:
         return ' '.join(str(text or '').strip().lower().split())
+
+    def _ensure_missing_columns(self) -> None:
+        inspector = inspect(self._engine)
+        columns = {col['name'] for col in inspector.get_columns('analytics_events')}
+        desired = {
+            'paper_id': self._column_type_sql('INTEGER'),
+            'paper_title': self._column_type_sql('TEXT'),
+            'related_search_event_id': self._column_type_sql('INTEGER'),
+        }
+        for name, type_sql in desired.items():
+            if name in columns:
+                continue
+            with self._engine.begin() as conn:
+                conn.execute(text(f'ALTER TABLE analytics_events ADD COLUMN {name} {type_sql}'))
+
+    def _column_type_sql(self, generic_type: str) -> str:
+        if self.backend_label == 'mysql':
+            mapping = {
+                'INTEGER': 'INT',
+                'TEXT': 'TEXT',
+            }
+            return mapping.get(generic_type, generic_type)
+        return generic_type
 
     def _normalize_record(self, record: Dict[str, Any]) -> Dict[str, Any]:
         normalized: Dict[str, Any] = {}

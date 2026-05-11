@@ -167,7 +167,7 @@
     }
     .metrics {
       display: grid;
-      grid-template-columns: repeat(4, minmax(0, 1fr));
+      grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
       gap: 14px;
       margin-bottom: 18px;
     }
@@ -350,6 +350,7 @@
         </div>
         <div class="export-row">
           <button type="button" class="soft export-btn" data-dataset="searches" data-format="csv">导出搜索 CSV</button>
+          <button type="button" class="soft export-btn" data-dataset="clicks" data-format="csv">导出点击 CSV</button>
           <button type="button" class="soft export-btn" data-dataset="keywords" data-format="csv">导出关键词 CSV</button>
           <button type="button" class="soft export-btn" data-dataset="daily" data-format="csv">导出按天 CSV</button>
           <button type="button" class="soft export-btn" data-dataset="keywords" data-format="json">导出关键词 JSON</button>
@@ -378,6 +379,11 @@
         <div class="metric-label">搜索用户数</div>
         <div class="metric-value" id="search-user-value">-</div>
         <div class="metric-note">发起过搜索的独立访客</div>
+      </div>
+      <div class="metric">
+        <div class="metric-label">论文点击数</div>
+        <div class="metric-value" id="click-value">-</div>
+        <div class="metric-note">用户点开论文详情的次数</div>
       </div>
     </section>
 
@@ -427,6 +433,26 @@
             <button id="next-btn" type="button">下一页</button>
           </div>
         </div>
+      </div>
+    </section>
+
+    <section class="panel" style="margin-top:18px">
+      <h2>最近论文点击</h2>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>点击时间</th>
+              <th>搜索词</th>
+              <th>论文</th>
+              <th>访客</th>
+              <th>搜索时间</th>
+            </tr>
+          </thead>
+          <tbody id="clicks-body">
+            <tr><td colspan="5">暂无点击数据</td></tr>
+          </tbody>
+        </table>
       </div>
     </section>
   </div>
@@ -492,6 +518,7 @@
       document.getElementById('uv-value').textContent = overview.unique_visitors ?? 0;
       document.getElementById('search-value').textContent = overview.searches ?? 0;
       document.getElementById('search-user-value').textContent = overview.search_visitors ?? 0;
+      document.getElementById('click-value').textContent = overview.paper_clicks ?? 0;
     }
 
     function renderKeywords(items) {
@@ -543,6 +570,29 @@
       }).join('');
     }
 
+    function shortVisitor(visitorId) {
+      const text = String(visitorId || '').trim();
+      if (!text) return '-';
+      return `${text.slice(0, 10)}...`;
+    }
+
+    function renderClicks(items) {
+      const body = document.getElementById('clicks-body');
+      if (!items || !items.length) {
+        body.innerHTML = '<tr><td colspan="5">暂无点击数据</td></tr>';
+        return;
+      }
+      body.innerHTML = items.map(item => `
+        <tr>
+          <td>${esc(item.clicked_at || '-')}</td>
+          <td>${esc(item.query_raw || item.query_normalized || '-')}</td>
+          <td>${esc(item.paper_title || item.paper_id || '-')}</td>
+          <td>${esc(shortVisitor(item.visitor_id))}</td>
+          <td>${esc(item.searched_at || '-')}</td>
+        </tr>
+      `).join('');
+    }
+
     async function loadAnalytics() {
       state.loading = true;
       document.getElementById('refresh-btn').disabled = true;
@@ -563,6 +613,7 @@
         renderOverview(data.overview || {});
         renderKeywords(data.top_keywords || []);
         renderSearches(data.recent_searches || {});
+        renderClicks(data.recent_clicks || []);
         setStatus('统计数据已刷新', 'ok');
       } catch (error) {
         setStatus(error.message || '加载失败', 'error');

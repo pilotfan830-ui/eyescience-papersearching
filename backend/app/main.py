@@ -13,7 +13,7 @@ from fastapi.responses import FileResponse, PlainTextResponse, Response
 from fastapi.staticfiles import StaticFiles
 
 from .analytics import AnalyticsStore, json_bytes
-from .schemas import PaperDetail, SearchResponse
+from .schemas import PaperClickRequest, PaperDetail, SearchResponse
 from .search_engine import SearchEngine
 
 app = FastAPI(title='Paper Search API', version='0.1.0')
@@ -178,7 +178,7 @@ def search(
     latency_ms = None
     if payload.get('timing'):
         latency_ms = payload['timing'].get('total_ms')
-    analytics.record_search(
+    search_event_id = analytics.record_search(
         visitor_id=visitor_id,
         ip_hash=_request_ip_hash(request),
         user_agent=_trim_header(request.headers.get('user-agent')),
@@ -193,12 +193,38 @@ def search(
         status_code=200,
     )
     return SearchResponse(
+        search_event_id=search_event_id or None,
         query=q,
         total=len(items),
         semantic_enabled=payload['semantic_enabled'],
         timing=payload.get('timing'),
         items=items,
     )
+
+
+@app.post('/api/analytics/paper-click')
+def track_paper_click(
+    payload: PaperClickRequest,
+    request: Request,
+    response: Response,
+):
+    visitor_id = _ensure_visitor_id(request, response)
+    click_event_id = analytics.record_paper_click(
+        visitor_id=visitor_id,
+        ip_hash=_request_ip_hash(request),
+        user_agent=_trim_header(request.headers.get('user-agent')),
+        referer=_trim_header(request.headers.get('referer')),
+        path=request.url.path,
+        paper_id=payload.paper_id,
+        paper_title=payload.paper_title,
+        related_search_event_id=payload.search_event_id,
+        query_raw=payload.query,
+        year_from=payload.year_from,
+        year_to=payload.year_to,
+        sort=payload.sort,
+        status_code=200,
+    )
+    return {'ok': True, 'click_event_id': click_event_id or None}
 
 
 @app.get('/api/admin/analytics')
@@ -228,7 +254,7 @@ def admin_analytics(
 @app.get('/api/admin/analytics/export')
 def admin_analytics_export(
     request: Request,
-    dataset: str = Query('searches', pattern='^(searches|keywords|daily)$'),
+    dataset: str = Query('searches', pattern='^(searches|keywords|daily|clicks)$'),
     format: str = Query('csv', pattern='^(csv|json)$'),
     date_from: Optional[date] = None,
     date_to: Optional[date] = None,
