@@ -2,10 +2,11 @@ from __future__ import annotations
 
 import csv
 import json
-from datetime import date, datetime, time, timedelta
+from datetime import UTC, date, datetime, time, timedelta
 from io import StringIO
 from pathlib import Path
 from typing import Any, Dict, List, Optional
+from zoneinfo import ZoneInfo
 
 from sqlalchemy import (
     Column,
@@ -86,6 +87,17 @@ class AnalyticsStore:
         )
         self.backend_label = self._engine.dialect.name
         self.ensure_schema()
+
+    _DISPLAY_TZ = ZoneInfo('Asia/Shanghai')
+    _DATETIME_FIELD_NAMES = {
+        'occurred_at',
+        'clicked_at',
+        'searched_at',
+        'first_clicked_at',
+        'last_clicked_at',
+        'last_searched_at',
+        'updated_at',
+    }
 
     def ensure_schema(self) -> None:
         self._metadata.create_all(self._engine, checkfirst=True)
@@ -853,12 +865,32 @@ class AnalyticsStore:
         normalized: Dict[str, Any] = {}
         for key, value in dict(record).items():
             if isinstance(value, datetime):
-                normalized[key] = value.isoformat(sep=' ', timespec='seconds')
+                normalized[key] = self._to_beijing_time(value)
             elif isinstance(value, date):
                 normalized[key] = value.isoformat()
+            elif isinstance(value, str) and key in self._DATETIME_FIELD_NAMES:
+                normalized[key] = self._to_beijing_time(value)
             else:
                 normalized[key] = value
         return normalized
+
+    def _to_beijing_time(self, value: datetime | str) -> str:
+        parsed: Optional[datetime] = None
+        if isinstance(value, datetime):
+            parsed = value
+        elif isinstance(value, str):
+            text_value = value.strip()
+            if not text_value:
+                return value
+            try:
+                parsed = datetime.fromisoformat(text_value.replace('Z', '+00:00'))
+            except ValueError:
+                return value
+        if parsed is None:
+            return str(value)
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=UTC)
+        return parsed.astimezone(self._DISPLAY_TZ).strftime('%Y-%m-%d %H:%M:%S')
 
 
 def json_bytes(payload: Dict[str, Any]) -> bytes:
