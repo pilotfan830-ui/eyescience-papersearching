@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import csv
 import json
-from datetime import UTC, date, datetime, time, timedelta
+from datetime import date, datetime, time, timedelta, timezone
 from io import StringIO
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -436,7 +436,7 @@ class AnalyticsStore:
     ) -> Dict[str, Any]:
         return {
             'dataset': dataset,
-            'generated_at': datetime.utcnow().isoformat(timespec='seconds') + 'Z',
+            'generated_at': datetime.now(timezone.utc).isoformat(timespec='seconds').replace('+00:00', 'Z'),
             'filters': {
                 'date_from': date_from.isoformat() if date_from else None,
                 'date_to': date_to.isoformat() if date_to else None,
@@ -889,7 +889,7 @@ class AnalyticsStore:
         if parsed is None:
             return str(value)
         if parsed.tzinfo is None:
-            parsed = parsed.replace(tzinfo=UTC)
+            parsed = parsed.replace(tzinfo=timezone.utc)
         return parsed.astimezone(self._DISPLAY_TZ).strftime('%Y-%m-%d %H:%M:%S')
 
 

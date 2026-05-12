@@ -478,4 +478,4 @@ def export_endnote(paper_id: int):
 
 
 if __name__ == '__main__':
-    uvicorn.run('app.main:app', host='0.0.0.0', port=421, reload=True)
+    uvicorn.run(app, host='0.0.0.0', port=421, reload=True)
